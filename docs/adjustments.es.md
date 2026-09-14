@@ -2,6 +2,9 @@
 
 ## Auditoría de la versión anterior
 
+Esta sección describe la versión histórica anterior a `sprint-1`. Para el uso
+actual, consultar [API pública](#api-pública) y [Orden matemático](#orden-matemático).
+
 `add()` construía un `CartItem` y sumaba cantidades si la colección contenía su
 `rowId`. Este era `md5(id . serialize(options))`, con `ksort()` solamente en el
 primer nivel de opciones. Nombre, precio, cantidad y alícuota no intervenían.
@@ -121,9 +124,38 @@ Varias coincidencias producen `AmbiguousItemException` antes de modificar nada;
 ninguna produce `InvalidRowIDException`. La regla también cubre `associate()`,
 `setTax()` y descuentos de línea.
 
-Los nuevos hashes incluyen alícuota normalizada además de código y opciones.
-Cambiar precio o nombre no cambia identidad; agregar otra vez la misma identidad
-suma cantidades y conserva el comportamiento de reemplazar otros atributos.
+La identidad actual es **código/id + options + alícuota**. Nombre, precio y cantidad
+no intervienen. `add()` incorpora una línea comercial: si encuentra la misma
+identidad completa, conserva su rowId, suma cantidades y reemplaza los demás
+atributos por los recibidos, incluso cuando cambia el precio o el nombre.
+Todas las opciones participan, incluidas `image`, `color`, `size`, `presentation`
+y `variant`: una imagen no es un dato visual ajeno a la identidad.
+
+```php
+Cart::add('P001', 'Martillo', 1, 10.00, 0, ['image' => '/img/martillo.jpg']);
+$item = Cart::add('P001', 'Martillo', 2, 10.00, 0, ['image' => '/img/martillo.jpg']);
+// Una línea con qty = 3 y la imagen conservada.
+Cart::add('P001', 'Martillo', 1, 10.00, 0, []);
+// Otra identidad: ahora el código P001 es ambiguo; usar rowId.
+```
+
+Para modificar una línea existente usar `update()`: cantidad desde los botones
+`+` / `−`, nombre, precio, alícuota, opciones o atributos de un `Buyable`. Conserva los
+atributos omitidos; para incrementar cantidad no hay que reenviar imagen ni otros
+datos mediante `add()`:
+
+```php
+$item = Cart::get($rowId);
+Cart::update($rowId, $item->qty + 1);
+// Conserva id, name, price, aliquot y options.image.
+// También se admite el código si sólo existe una línea con ese código.
+```
+
+`rowId` identifica inequívocamente la línea. Conservar el devuelto por `add()` o
+`update()`, o consultarlo en `content()`; no calcularlo ni predecirlo. Si hay
+variantes P001 roja/azul, `get('P001')`, `update('P001', 2)` y `remove('P001')`
+lanzan `AmbiguousItemException` y requieren el rowId correspondiente.
+
 Se mantiene el ordenamiento superficial de opciones, no se canonicalizan arrays
 anidados. Los rowId antiguos se conservan al leer, agregar o actualizar atributos
 sin cambio de identidad. Cambiar identidad mueve sus descuentos; fusionar líneas
@@ -134,15 +166,34 @@ de campos de los objetos en la colección.
 
 ## Orden matemático
 
-1. Base original de cada producto = cantidad × precio, cuantizada a centavos.
+1. Base original de cada producto = cantidad × precio, cuantizada a centavos:
+   HALF_UP en GENERAL/HKA; truncamiento hacia cero en PNP.
 2. Cada costo PRORATED se reparte según las bases originales positivas; se suma a
    los productos y hereda su alícuota. Varios prorrateos usan los mismos pesos.
 3. Descuentos de línea en orden de registro, sobre el saldo de esa línea.
 4. Descuentos generales en orden de registro, sobre los saldos de productos;
    reparto proporcional por esas bases restantes.
-5. Se incorporan las bases de los costos ITEM y se agrupan por alícuota.
-6. Se calcula IVA mediante `CartItem::calculateTaxes()` y `config('cart.taxes')`.
+5. Cada costo ITEM se incorpora como otra línea fiscal, separado de los productos.
+6. Sobre las bases finales, cada driver aplica su estrategia de IVA indicada abajo,
+   mediante `CartItem::calculateTaxes()` y `config('cart.taxes')`.
 7. Se suman base final + IVA + propina + costos legados sin modo.
+
+Hasta obtener las bases finales se comparte el orden de prorrateos y descuentos,
+con la cuantización inicial propia del driver. La base final de producto es su
+base original cuantizada + prorrateos asignados − descuentos aplicables; los
+ajustes se calculan y reparten en centavos. Desde allí difiere la acumulación:
+
+| Driver | Base por línea de producto | IVA sobre las bases finales |
+| --- | --- | --- |
+| GENERAL | HALF_UP a 2 decimales | Calcula y redondea HALF_UP el IVA de cada línea fiscal; después suma por alícuota |
+| HKA | HALF_UP a 2 decimales | Suma bases por alícuota y calcula una vez su IVA, redondeado HALF_UP |
+| PNP | Truncamiento hacia cero a 2 decimales | Suma bases truncadas por alícuota y trunca hacia cero el IVA acumulado |
+
+Cada ITEM calcula IVA individual en GENERAL y se incorpora a la base de su
+alícuota en HKA/PNP. Sigue en `costLines`, sin convertirse en `CartItem`. Su importe
+ya llega cuantizado a centavos por `addCost()` con HALF_UP en todos los drivers;
+PNP no vuelve a truncar el importe original registrado. PRORATED ya forma parte
+de las bases finales de productos y no se vuelve a sumar al total.
 
 Los descuentos generales excluyen costos ITEM, propinas y costos legados. Los
 porcentajes deben estar entre 0 y 100; los fijos no pueden ser negativos. Un fijo
@@ -158,11 +209,44 @@ observación `type=tip`, `description`, `amount`, `text`.
 
 `summary()['lines']` permite construir las líneas fiscales de productos: `original`,
 `prorated`, `discount`, `base`, `aliquot`, `rowId`, `id`. `costLines` contiene los
-conceptos ITEM facturables. `bases` está indexado por alícuota. La propina aparece en
+conceptos ITEM facturables. `bases` siempre muestra las bases finales agrupadas
+por alícuota para consulta/facturación, incluso en GENERAL, cuyo IVA se calcula
+por línea. `taxes` usa el nombre configurado de cada impuesto, con `IVA` como
+porcentaje y `value` como importe calculado por el driver; `tax` suma esos importes.
+Por tanto, GENERAL y HKA pueden devolver **bases idénticas e impuestos diferentes**:
+es correcto y esperado. La propina aparece en
 `tip` y en observaciones. **Para facturar ajustes usar `summary()`**, pues
 `content()` y los getters propios de `CartItem` conservan los precios originales.
 `totalTaxes($input, $taxes)` calcula solamente los productos recibidos, sin los
-metadatos del documento; `tax()` devuelve el IVA final con ajustes.
+metadatos del documento, con la misma estrategia de cada driver: GENERAL por
+fila completa, HKA por bases acumuladas y PNP por bases truncadas acumuladas.
+`tax()` devuelve el IVA final con ajustes.
+
+### Ejemplos fiscales de centavos
+
+Con dos líneas distintas de 0.03 e IVA del 16%:
+
+```text
+GENERAL: 0.03 × 16% = 0.0048 → 0.00 en cada línea; suma IVA = 0.00
+HKA: (0.03 + 0.03) × 16% = 0.0096 → 0.01
+Bases GENERAL = 0.06; bases HKA = 0.06
+IVA GENERAL = 0.00; IVA HKA = 0.01
+```
+
+GENERAL toma la línea completa, no cada unidad física: cantidad 2 × precio 10.23
+= base 20.46; IVA 16% = 3.2736 → **3.27**. Calcular primero IVA unitario redondeado
+daría 1.64 × 2 = 3.28 y no corresponde a esta estrategia.
+
+Con dos líneas distintas de 0.039 e IVA del 16%:
+
+```text
+HKA: 0.039 → 0.04 cada línea; base = 0.08; IVA = 0.0128 → 0.01
+PNP: 0.039 → 0.03 cada línea; base = 0.06; IVA = 0.0096 → 0.00
+```
+
+Estos casos corresponden a `tests/FiscalDriverTest.php`. Las líneas deben tener
+identidades distintas; dos `add()` con la misma identidad acumulan cantidad y
+constituyen una sola línea fiscal.
 
 ## Precisión y cambios de comportamiento
 
@@ -190,9 +274,10 @@ ahora persistente. Para nuevas operaciones especificar ITEM o PRORATED.
 Cambios a considerar al actualizar:
 
 - Los nuevos rowId incluyen alícuota; no generar ni predecir hashes en la aplicación.
-- GENERAL devuelve todas las alícuotas y calcula IVA agrupado por base, corrigiendo
-  la antigua agrupación indiscriminada. Redondeo unitario vs agrupado puede cambiar
-  centavos. HKA conserva agrupación; PNP ahora usa la misma base para subtotal e IVA.
+- GENERAL devuelve todas las alícuotas y suma el IVA redondeado de cada línea
+  fiscal final. No usa IVA unitario por cantidad ni IVA sobre bases agrupadas.
+  HKA calcula IVA después de agrupar bases por alícuota; PNP agrupa bases truncadas
+  y trunca el IVA final. Estas estrategias pueden producir diferencias de centavos.
 - Subtotal incorpora ajustes y costos ITEM. No volver a sumar totalCost ni restar
   totalDiscount al total: ya están incluidos, salvo la separación informativa.
 - `calculateTaxes()` retorna números crudos; los métodos de presentación permanecen
@@ -217,7 +302,8 @@ La suite nueva necesita PHP 8.1+ y prueba las dependencias Laravel 10/11.
 | Descuento general 10% | 10.45 | 5.50 | 0.00 |
 | Base final | 94.05 | 49.50 | 20.00 |
 
-Base GENERAL 114.05; exenta 49.50; subtotal 163.55; IVA GENERAL 18.25;
+Con driver HKA: base de alícuota GENERAL 114.05; exenta 49.50; subtotal 163.55;
+IVA de alícuota GENERAL 18.25;
 propina 5.00; total 186.80. Costos registrados: 40.00. Descuento efectivo: 21.45.
 
 ## Verificación y archivos
@@ -230,7 +316,10 @@ aislamiento, destroy, snapshots antiguos y nuevos, merge y escenario completo.
 Archivos de implementación: `src/Cart.php`, `src/CartItem.php`,
 `src/ShoppingcartServiceProvider.php`; nuevos `src/CartAdjustments.php`,
 `src/Money.php`, `src/Exceptions/AmbiguousItemException.php`. Infraestructura:
-`composer.json`, `phpunit.xml`, `.gitignore`, `tests/bootstrap.php`, `tests/CartTest.php`.
+`composer.json`, `phpunit.xml`, `.gitignore`, `tests/bootstrap.php`, `tests/CartTest.php`
+y `tests/FiscalDriverTest.php`. Este último cubre las diferencias fiscales, bases
+iguales con IVA distinto, cantidades mayores que uno, alícuotas mixtas, ITEM,
+PRORATED, descuentos y exclusión de propina/legacy.
 Se actualizan los enlaces de ambos README y esta guía. No se alteran las tasas ni
 la migración existente.
 
@@ -246,14 +335,18 @@ de drivers, `store`, `restore`, `merge`, `addCartItem`, `getContent`,
 `generateRowId` y cálculos numéricos de los drivers. `associate()` adquiere la
 resolución por código a través de `get()` sin duplicar búsquedas.
 
-Resultado de ejecución local (PHP 8.2.28, PHPUnit 10.5.64):
+Resultado histórico de la suite inicial (PHP 8.2.28, PHPUnit 10.5.64), anterior
+a las pruebas específicas de drivers:
 
 | Dependencias Illuminate | Tests | Assertions | Resultado |
 | --- | ---: | ---: | --- |
 | 10.49.0 | 47 | 198 | Correcto |
 | 11.51.0 | 47 | 198 | Correcto |
 
-También pasan `php -l` en src/tests y `git diff --check`. `composer validate`
-acepta el manifiesto y mantiene la advertencia preexistente sobre `version`.
-El entorno final queda con Illuminate 11.51.0. No había suite anterior para ejecutar;
-las pruebas nuevas incluyen los comportamientos previos que se conservan.
+En aquella validación también pasaron `php -l` en src/tests y `git diff --check`.
+`composer validate` aceptó el manifiesto con la advertencia preexistente sobre
+`version`. Esos resultados históricos no representan la suite fiscal ampliada.
+
+La validación documental actual con Illuminate 11.51.0, PHP 8.2.28 y PHPUnit
+10.5.64 ejecutó `composer test`: **75 tests y 871 assertions**, todos correctos.
+Incluye los 47 tests iniciales y 28 casos fiscales adicionales.

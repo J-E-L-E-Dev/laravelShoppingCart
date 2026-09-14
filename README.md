@@ -110,19 +110,52 @@ You can modify the name and value properties to your needs.
 
 For Venezuela, the package supports invoice calculation for the fiscal providers 'The Factory HKA' and 'PNP Developments'
 
-There are three available controller options, with 'HKA' being the default choice. The pricing calculation differences between them are as follows:
+There are three drivers; HKA is the default. `config('cart.driver')` controls both
+how bases and VAT are quantized and when bases are accumulated before calculating VAT.
 
+| Driver | Base per product line | VAT calculation |
+| --- | --- | --- |
+| GENERAL | HALF_UP to 2 decimal places | Round VAT for each final fiscal line, then sum by tax category |
+| HKA | HALF_UP to 2 decimal places | Sum final bases by tax category, then round VAT |
+| PNP | Truncate toward zero to 2 decimal places | Sum truncated bases by tax category, then truncate VAT |
+
+First quantize `quantity × price`, then add allocated PRORATED costs and subtract
+applicable line and document discounts to obtain each final product base.
+Allocations and discounts operate in cents. Each ITEM cost is another fiscal line:
+GENERAL taxes it independently; HKA and PNP include it in its tax category's
+accumulated base. ITEM amounts are already rounded to cents when registered.
+PRORATED is already included in product bases and is not added again. Tips and
+legacy costs increase the total without entering taxable bases or VAT.
+
+**GENERAL versus HKA, two separate lines of 0.03 at 16% VAT:**
+
+```text
+GENERAL: 0.03 × 16% = 0.0048 → 0.00 for each line; VAT = 0.00
+HKA:     (0.03 + 0.03) × 16% = 0.0096 → 0.01
+
+GENERAL base = 0.06; VAT = 0.00
+HKA base     = 0.06; VAT = 0.01
 ```
-    GENERAL:
-           55.866 = 55.87 | 55.865 = 55.87 | 55.864 = 55.86
-        
-    HKA:
-           55.866 = 55.87 | 55.865 = 55.87 | 55.864 = 55.86
-       
-    PNP:
-           55.866 = 55.86 | 55.865 = 55.86 | 55.864 = 55.86
+
+`summary()['bases']` always contains final bases grouped by tax category for
+invoicing and queries. This does not mean GENERAL uses grouped bases to calculate
+VAT. **Identical bases with different `summary()['taxes']` are correct and expected.**
+Tax entries use names from `config('cart.taxes')`; `IVA` is the percentage and
+`value` is the tax amount.
+
+**GENERAL uses the whole line, including quantity:** for quantity 2, price 10.23
+and VAT 16%, the base is `2 × 10.23 = 20.46`; VAT is `3.2736 → 3.27`.
+Rounding unit VAT first would give `1.64 × 2 = 3.28`, which is not this strategy.
+
+**HKA versus PNP, two separate lines of 0.039 at 16% VAT:**
+
+```text
+HKA: 0.039 → 0.04 each; base = 0.08; VAT = 0.0128 → 0.01
+PNP: 0.039 → 0.03 each; base = 0.06; VAT = 0.0096 → 0.00
 ```
-If you wish to change these options, you will need to publish the configuration file.
+
+See the [adjustments guide (Spanish)](docs/adjustments.es.md#orden-matemático)
+for the complete calculation order. To change the driver, publish the configuration file.
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
@@ -154,49 +187,85 @@ You can operate the shopping cart using the following methods:
 
 ### add
 
-To add an item to the shopping cart, simply use the `add()` method, which accepts a variety of parameters.
+Use `Cart::add()` to incorporate a commercial line into the cart. It returns the
+resulting `CartItem`. Arguments are product code/id, name, quantity, unit price
+before VAT, tax category and options. Omitting the category uses
+`cart.default_aliquot`; an explicit category must exist in `cart.taxes`
+(default keys: 0, 1, 2 and 3).
 
-In its most basic form you can specify the id, name, quantity, price of the product you'd like to add to the cart.
+**Line identity = product code/id + options + tax category.**
+`name`, `price` and `qty` are not part of identity. Every option participates,
+including `image`, `color`, `size`, `presentation` and `variant`; options are not
+merely display metadata.
 
-```
-   Cart::add('code','product name...',1,1.30);
-```
-
-In this way, the item will be added and the tax amount will be calculated using the default tax rate defined by the default_aliquot property in the configuration file.
-
-Optionally, the fifth parameter corresponds to the identifier of the tax rate to apply, which takes values from 0 to 4. Meanwhile, the sixth parameter is an array of options that you can use according to your needs, such as providing an image URL to display the product.
-
-```
-    Cart::add('code','product name...',1,1.30,1,["image" => 'url image']);
-```
-
-**The `add()` method will return an CartItem instance of the item you just added to the cart.**
-
-If you prefer to add an item using an array, as long as the array contains the required keys, you can pass it to the method while omitting the rest of the parameters. The aliquot and options keys are optional.
-
-```
-    Cart::add(['id' => 'code', 'name' => 'product name...', 'qty' => 1, 'price' => 1.30, 'options' => ["image" => 'url image']]);
+```php
+Cart::add('P001', 'Hammer', 1, 10.00, 0, ['image' => '/img/hammer.jpg']);
+$item = Cart::add('P001', 'Hammer', 2, 10.00, 0, ['image' => '/img/hammer.jpg']);
+// One P001 line: qty = 3, options.image = /img/hammer.jpg
 ```
 
-Adding the same code, options and aliquot again increments quantity. Different options or aliquots produce separate lines. Methods targeting a line also accept its product code when exactly one line matches; ambiguous codes throw `AmbiguousItemException` and require `rowId`.
+Calling `add()` again with the same complete identity reuses the line and adds
+quantity. Different options or tax categories create different identities:
+
+```php
+Cart::add('P001', 'Hammer', 1, 10.00, 0, []);
+// A separate line from P001 with ['image' => '/img/hammer.jpg'].
+```
+
+**Consideration:** a different price or name does not create another identity.
+For the same code, options and category, `add()` accumulates quantity and replaces
+the other attributes with those supplied in the new addition, including price
+and name. To edit an existing line, use `update()`.
+
+The array form requires `id`, `name`, `qty` and `price`; `aliquot` and `options`
+are optional:
+
+```php
+Cart::add(['id' => 'P002', 'name' => 'Pliers', 'qty' => 1, 'price' => 12.00]);
+```
 
 ### update
 
-To update an item in the cart, you will need the rowId. You can use the `update()` method to update it. If you only want to update the quantity, you will pass the rowId and the new quantity to the update method.
+Use `Cart::update()` to modify an existing line: quantity from the + / − buttons,
+name, price, tax category, options, or attributes supplied by a `Buyable`.
+It accepts a `rowId` or a product code that matches exactly one line.
 
-
-
-```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';
-    Cart::update($rowId, 2);
-```
-If you want to update more attributes of the item, you can pass an array or a Comparable as the second parameter to the update method. This way, you can update all the information of the item with the provided rowId.
+For the cart's + button, send the new quantity:
 
 ```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';   
-    Cart::update($rowId, ['name' => 'new name']);
-    Cart::update($rowId, $product);
+$item = Cart::get($rowId);
+Cart::update($rowId, $item->qty + 1);
+
+// Alternative when P001 identifies exactly one line:
+$item = Cart::get('P001');
+Cart::update('P001', $item->qty + 1);
 ```
+
+No new `add()` call or resubmission of name, price, tax category, options or image
+is needed. `update()` starts from the existing line and preserves omitted attributes.
+
+Independent example with an image:
+
+```php
+$item = Cart::add('P001', 'Hammer', 1, 10.00, 0, ['image' => '/img/hammer.jpg']);
+Cart::update($item->rowId, 2);
+// Only qty changes; id, name, price, aliquot and options.image are preserved.
+```
+
+This preserves the image and identity. Calling
+`Cart::add('P001', 'Hammer', 1, 10.00, 0, [])` instead would create a different
+identity: `[]` differs from `['image' => '/img/hammer.jpg']`.
+
+Pass a partial array or an object implementing `Buyable` for other changes:
+
+```php
+$item = Cart::update($rowId, ['name' => 'New name', 'price' => 11.00]);
+$item = Cart::update($item->rowId, $product); // $product implements Buyable
+```
+
+Updating options or the tax category can change `rowId`; keep the returned item's
+identifier. A matching destination identity merges quantities. A quantity of zero
+or less removes the line.
 
 ### content
 
@@ -215,12 +284,29 @@ This method will return the content of the current cart instance, if you want th
 
 ### get
 
-If you want to retrieve only one item from the cart, you can call the `get()` method and pass the rowId to it.
+`get()`, `update()` and `remove()` accept a `rowId` or product code/id. A code is
+valid only if it identifies exactly one line:
 
 ```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';   
-    Cart::get($rowId);
+Cart::get('P001');
+Cart::update('P001', 2);
+Cart::remove('P001');
 ```
+
+If P001 has red and blue variants, or multiple options/tax category combinations,
+`Cart::get('P001')` throws `AmbiguousItemException`; so do `update()` and `remove()`
+with that code. Use the specific line's `rowId` instead.
+
+`rowId` unambiguously identifies a cart line. Keep it from the returned `CartItem`
+or `content()`; do not calculate or predict it in your application.
+
+```php
+$item = Cart::get($rowId);
+```
+
+Lookup checks the exact `rowId` first, then the product code. A missing line throws
+`InvalidRowIDException`. See the [identity guide](docs/adjustments.es.md#api-pública)
+for explicit `getByRowId()` and `getById()` lookup.
 
 ### search
 
@@ -248,7 +334,8 @@ You can set the default number format in the config file.
 
 ### tax
 
-The `tax()` method can be used to get the calculated amount of tax for all items in the cart, given there price, quantity and configured driver.
+`tax()` returns VAT on final product and ITEM cost bases according to the driver,
+including prorated costs and discounts. It excludes tips and legacy costs.
 
 ```php
     Cart::tax();
@@ -277,13 +364,14 @@ Here's an example of a response with the HKA driver:
     }
 ```
 
-You can set the default number format in the config file.
+Tax amounts are numeric; `cart.format` does not change them.
 
 **If you're not using the Facade, but use dependency injection in your (for instance) Controller, you can also simply get the tax property `$cart->tax`**
 
 ### subtotal
 
-The `subtotal()` method can be used to get the total of all items in the cart, minus the total amount of tax.
+`subtotal()` returns the formatted final base of products and ITEM costs after
+prorated costs and discounts. It excludes VAT, tips and legacy costs.
 
 ```php
     Cart::subtotal();
@@ -321,12 +409,15 @@ Get an addition cost you added by `addCost()`. Accepts the cost name. Returns th
 
 ### remove
 
-To remove an item from the cart, you need to pass the rowId to the `remove()` method, and it will delete the item from the cart.
+Remove a line using its `rowId` or a product code matching exactly one line:
 
 ```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';   
-    Cart::remove($rowId);
+Cart::remove($rowId);
+// Alternative for a unique product code:
+Cart::remove('P001');
 ```
+
+An ambiguous code throws `AmbiguousItemException`; use `rowId` for variants.
 
 ### destroy
 
