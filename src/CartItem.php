@@ -189,7 +189,8 @@ class CartItem implements Arrayable, Jsonable
     /**
      * Presenta cantidad por priceTax original, sin ajustes del documento.
      *
-     * Utiliza el precio con IVA unitario conservado; no agrupa bases como Cart::summary().
+     * Utiliza el precio con IVA unitario conservado; no aplica la estrategia fiscal
+     * por fila completa o por base acumulada de Cart::summary().
      *
      * @return string Importe original con IVA, formateado.
      */
@@ -214,8 +215,8 @@ class CartItem implements Arrayable, Jsonable
     /**
      * Presenta IVA unitario por cantidad, sin ajustes documentales.
      *
-     * Multiplica el impuesto unitario ya cuantizado; puede diferir del impuesto
-     * calculado sobre bases agrupadas por alícuota en Cart::summary().
+     * Multiplica el impuesto unitario ya cuantizado; puede diferir del IVA de la
+     * fila completa (GENERAL) o de las bases acumuladas (HKA/PNP) en Cart::summary().
      *
      * @return string IVA de la línea original formateado.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
@@ -395,6 +396,9 @@ class CartItem implements Arrayable, Jsonable
      * arriba a centavos; PNP trunca hacia cero. Un driver desconocido usa GENERAL.
      * La tasa recibida ya es un porcentaje: este método no consulta su alícuota
      * ni agrupa productos. Devuelve un número crudo, no un importe formateado.
+     * La estrategia de acumulación pertenece a Cart: GENERAL entrega la base
+     * completa de una línea fiscal; HKA y PNP entregan la base acumulada de
+     * una alícuota. El cálculo unitario de los getters no sustituye esas bases.
      *
      * @param int|float|numeric-string $price Base sin IVA, unitaria o agrupada por el llamador.
      * @param int|float|numeric-string $tax_rate Porcentaje de IVA.

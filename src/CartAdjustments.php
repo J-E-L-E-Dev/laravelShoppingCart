@@ -306,8 +306,13 @@ trait CartAdjustments
      *    dentro de cada grupo, siempre sobre el saldo restante antes del IVA.
      *    Los porcentajes redondean a centavos; un fijo se limita al saldo.
      *    Los generales afectan únicamente productos, no ITEM, propina ni legacy.
-     * 4. Agrega las bases ITEM y agrupa por alícuota. Usa cart.taxes y
-     *    CartItem::calculateTaxes(): HKA/GENERAL redondean y PNP trunca el IVA.
+     * 4. Trata cada ITEM como línea fiscal adicional. GENERAL redondea el IVA
+     *    de cada línea final y suma los importes por alícuota. HKA acumula bases
+     *    finales por alícuota y redondea su IVA; PNP acumula las bases obtenidas
+     *    desde filas truncadas y trunca el IVA final. Usa cart.taxes y
+     *    CartItem::calculateTaxes(); los ITEM ya llegan cuantizados en centavos.
+     *    bases siempre muestra las sumas por alícuota para consulta, incluso
+     *    cuando GENERAL calcula los impuestos por línea.
      * 5. Suma base final + IVA + propina + legacy. Costos prorrateados y descuentos
      *    ya distribuidos no se contabilizan por segunda vez.
      *
@@ -396,19 +401,19 @@ trait CartAdjustments
             }
             $applied[] = array_merge($discount, ['amount' => $amount / 100, 'cents' => $amount, 'allocations' => $allocation]);
         }
-        $bases = $taxes = [];
+        $bases = [];
         foreach (config('cart.taxes') as $aliquot => $tax) {
             $bases[$aliquot] = 0;
-            $taxes[$tax['name']] = ['IVA' => $tax['value'], 'value' => 0];
         }
         foreach ($lines as $line) $bases[$line['aliquot']] += $line['base'];
         foreach ($costLines as $cost) $bases[$cost['aliquot']] += $cost['cents'];
+        $fiscalLines = [];
+        foreach ($lines as $line) $fiscalLines[] = ['aliquot' => $line['aliquot'], 'base' => $line['base']];
+        foreach ($costLines as $cost) $fiscalLines[] = ['aliquot' => $cost['aliquot'], 'base' => $cost['cents']];
+        $taxes = $this->calculateFiscalTaxes($fiscalLines, [], config('cart.driver') === 'GENERAL');
         $taxTotal = 0;
+        foreach ($taxes as $tax) $taxTotal += Money::cents($tax['value']);
         foreach ($bases as $aliquot => $base) {
-            $tax = config('cart.taxes.' . $aliquot);
-            $value = Money::cents(CartItem::calculateTaxes($base / 100, $tax['value']));
-            $taxes[$tax['name']]['value'] = $value / 100;
-            $taxTotal += $value;
             $bases[$aliquot] = $base / 100;
         }
         $subtotal = array_sum(array_column($lines, 'base')) + array_sum(array_column($costLines, 'cents'));

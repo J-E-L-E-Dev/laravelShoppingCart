@@ -445,7 +445,7 @@ class Cart
     /**
      * Presenta el importe final que debe pagar el cliente, calculado por summary().
      *
-     * Incluye bases con prorrateos y descuentos, bases ITEM e IVA agrupado, más
+     * Incluye bases con prorrateos y descuentos, bases ITEM e IVA según el driver, más
      * propina y recargos legacy. No se deben sumar totalCost() ni restar
      * totalDiscount() otra vez. cart.format afecta únicamente la presentación.
      *
@@ -492,7 +492,8 @@ class Cart
      * Devuelve el IVA de las bases finales de productos y costos ITEM.
      *
      * Incluye prorrateos y descuentos antes del impuesto; excluye propina y legacy.
-     * summary() agrupa por alícuota y utiliza nombres y tasas de cart.taxes.
+     * GENERAL suma IVA calculado por línea; HKA y PNP calculan sobre bases
+     * acumuladas. El resultado utiliza nombres y tasas de cart.taxes.
      * value es el importe numérico del IVA; IVA es la tasa porcentual del catálogo.
      *
      * @return array<string, array{IVA: int|float, value: int|float}> Impuestos indexados por nombre configurado.
@@ -508,8 +509,10 @@ class Cart
      * Calcula impuestos únicamente para los CartItem recibidos, sin metadatos.
      *
      * Selecciona el adaptador por cart.driver; el caso desconocido usa hkaDriver().
-     * Todos delegan en taxesForItems(), que conserva entradas ajenas de taxes y
-     * reemplaza las correspondientes al catálogo. Para IVA con ajustes usar tax().
+     * GENERAL calcula IVA sobre cada fila completa y suma los importes por alícuota.
+     * HKA acumula bases redondeadas; PNP acumula bases truncadas y trunca su IVA.
+     * Conserva entradas ajenas de taxes y reemplaza las del catálogo.
+     * Para IVA con ajustes usar tax().
      *
      * @param Collection<array-key, CartItem>|array<array-key, CartItem> $input Productos sin liquidación documental.
      * @param array<string, mixed> $taxes Resultado inicial a completar o reemplazar por nombre configurado.
@@ -538,9 +541,10 @@ class Cart
     }
 
     /**
-     * Adapta la consulta de GENERAL al cálculo compartido de bases e impuestos.
+     * Calcula IVA por fila completa y suma los importes por alícuota para GENERAL.
      *
-     * No cambia cart.driver: taxesForItems() consulta la configuración vigente.
+     * Redondea cantidad por precio antes de calcular el IVA de cada fila;
+     * no multiplica IVA unitario ni calcula IVA sobre una base agrupada.
      *
      * @param Collection<array-key, CartItem>|array<array-key, CartItem> $input Productos originales.
      * @param array<string, mixed> $taxes Entradas iniciales del resultado.
@@ -549,13 +553,13 @@ class Cart
      */
     protected function generalDriver($input, array $taxes)
     {
-        return $this->taxesForItems($input, $taxes);
+        return $this->taxesForItems($input, $taxes, true);
     }
 
     /**
-     * Adapta la consulta de HKA al cálculo compartido de bases e impuestos.
+     * Acumula bases redondeadas por alícuota y calcula su IVA una sola vez para HKA.
      *
-     * No cambia cart.driver: taxesForItems() consulta la configuración vigente.
+     * Usa el redondeo de Money y CartItem correspondiente a cart.driver.
      *
      * @param Collection<array-key, CartItem>|array<array-key, CartItem> $input Productos originales.
      * @param array<string, mixed> $taxes Entradas iniciales del resultado.
@@ -568,9 +572,9 @@ class Cart
     }
 
     /**
-     * Adapta la consulta de PNP al cálculo compartido de bases e impuestos.
+     * Acumula bases truncadas por alícuota y trunca el IVA acumulado para PNP.
      *
-     * No cambia cart.driver: taxesForItems() consulta la configuración vigente.
+     * La configuración PNP activa el truncamiento en Money y CartItem.
      *
      * @param Collection<array-key, CartItem>|array<array-key, CartItem> $input Productos originales.
      * @param array<string, mixed> $taxes Entradas iniciales del resultado.
@@ -583,26 +587,59 @@ class Cart
     }
 
     /**
-     * Agrupa bases de productos por alícuota y reemplaza sus entradas de impuestos.
+     * Convierte productos originales en bases de filas para la estrategia fiscal.
      *
      * Cuantiza cantidad por precio a centavos por línea; trunca solo si cart.driver
-     * es PNP. Sobre cada suma usa CartItem::calculateTaxes() con la tasa del catálogo.
-     * No aplica costos ni descuentos y no altera los productos.
+     * es PNP. Delega el IVA por fila o por acumulación en calculateFiscalTaxes().
+     * No aplica costos ni descuentos y no altera los productos ni sus cantidades.
      *
      * @param Collection<array-key, CartItem>|array<array-key, CartItem> $input Líneas a agrupar.
      * @param array<string, mixed> $taxes Entradas previas; las del catálogo se sobrescriben.
+     * @param bool $perLine True para GENERAL; false para acumular bases por alícuota.
      * @return array<string, mixed> Resultado fiscal por nombre configurado.
      * @throws \InvalidArgumentException Si Money rechaza un importe.
      */
-    private function taxesForItems($input, array $taxes)
+    private function taxesForItems($input, array $taxes, $perLine = false)
+    {
+        $lines = [];
+        foreach ($input as $item) {
+            $lines[] = [
+                'aliquot' => $item->aliquot,
+                'base' => Money::cents($item->qty * $item->price, config('cart.driver') === 'PNP'),
+            ];
+        }
+
+        return $this->calculateFiscalTaxes($lines, $taxes, $perLine);
+    }
+
+    /**
+     * Calcula IVA por línea fiscal o por base acumulada, conservando centavos.
+     *
+     * Recibe bases ya cuantizadas: productos tras los ajustes en summary(),
+     * o filas originales en totalTaxes(). Cada operación ITEM es una línea más.
+     * GENERAL cuantiza el IVA de cada base y suma esos centavos por alícuota.
+     * HKA y PNP suman primero bases y calculan el IVA una vez por alícuota;
+     * CartItem::calculateTaxes() redondea en HKA y trunca en PNP.
+     * No cambia bases, ajustes ni metadatos. Las entradas ajenas de taxes se conservan.
+     *
+     * @param array<array-key, array{aliquot: int|string, base: int}> $lines Bases fiscales en centavos.
+     * @param array<string, mixed> $taxes Entradas iniciales del resultado.
+     * @param bool $perLine True para IVA por línea; false para IVA sobre bases acumuladas.
+     * @return array<string, mixed> IVA numérico por nombre del catálogo y entradas ajenas.
+     * @throws \InvalidArgumentException Si Money rechaza un importe de IVA.
+     */
+    private function calculateFiscalTaxes(array $lines, array $taxes, $perLine)
     {
         $bases = [];
-        foreach ($input as $item) {
-            $aliquot = $item->aliquot;
-            $bases[$aliquot] = ($bases[$aliquot] ?? 0) + Money::cents($item->qty * $item->price, config('cart.driver') === 'PNP');
-        }
+        foreach ($lines as $line) $bases[$line['aliquot']][] = $line['base'];
         foreach (config('cart.taxes') as $aliquot => $tax) {
-            $taxes[$tax['name']] = ['IVA' => $tax['value'], 'value' => CartItem::calculateTaxes(($bases[$aliquot] ?? 0) / 100, $tax['value'])];
+            $lineBases = $bases[$aliquot] ?? [];
+            $taxBases = $perLine ? $lineBases : [array_sum($lineBases)];
+            $value = 0;
+            foreach ($taxBases as $base) {
+                $value += Money::cents(CartItem::calculateTaxes($base / 100, $tax['value']));
+            }
+            $taxes[$tax['name']] = ['IVA' => $tax['value'], 'value' => $value / 100];
         }
         return $taxes;
     }
