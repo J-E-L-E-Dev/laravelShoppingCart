@@ -1,4 +1,11 @@
 # Laravel Shopping Cart
+
+El carrito admite costos ITEM/PRORATED persistentes, propinas, descuentos por línea
+y documento, observaciones estructuradas y búsqueda segura por código. Consultar
+la [guía de ajustes y migración](docs/adjustments.es.md) para la API completa,
+orden matemático, precisión y cambios de compatibilidad. Usar `summary()` para
+las bases ajustadas de la factura; `content()` conserva los atributos originales.
+
 ### Compatibility:
 [![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
 [![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
@@ -106,19 +113,53 @@ Puede modificar las propiedades name y value seg&uacute;n sus necesidades.
 
 Para Venezuela, el paquete soporta el c&aacute;lculo de facturas para los proveedores fiscales 'The Factory HKA' y 'Desarrollos PNP'
 
-Hay tres opciones de controlador disponibles, siendo 'HKA' la opci&oacute;n predeterminada. Las diferencias en el c&aacute;lculo de precios entre ellos son las siguientes:
+Hay tres drivers; HKA es el predeterminado. `config('cart.driver')` determina tanto
+cómo se cuantizan bases e impuestos como cuándo se acumulan las bases antes del IVA.
 
+| Driver | Base por línea de producto | Cálculo del IVA |
+| --- | --- | --- |
+| GENERAL | HALF_UP a 2 decimales | Redondea IVA por cada línea fiscal final y luego suma por alícuota |
+| HKA | HALF_UP a 2 decimales | Agrupa bases finales por alícuota y redondea su IVA |
+| PNP | Truncamiento hacia cero a 2 decimales | Agrupa bases truncadas por alícuota y trunca el IVA |
+
+Primero se cuantiza `cantidad × precio`; después se suma el PRORATED asignado y
+se restan los descuentos de línea y generales aplicables para obtener la base
+final del producto. Repartos y descuentos operan en centavos. Cada costo ITEM es
+otra línea fiscal: GENERAL calcula su IVA individualmente; HKA y PNP lo incorporan
+a la base acumulada de su alícuota. El importe ITEM ya se redondea a centavos al
+registrarlo. PRORATED ya está incluido en las bases y no se vuelve a sumar.
+Propina y costos legacy aumentan el total sin integrar bases ni generar IVA.
+
+**GENERAL frente a HKA, dos líneas separadas de 0.03 con IVA del 16%:**
+
+```text
+GENERAL: 0.03 × 16% = 0.0048 → 0.00 por cada línea; IVA = 0.00
+HKA:     (0.03 + 0.03) × 16% = 0.0096 → 0.01
+
+Base GENERAL = 0.06; IVA = 0.00
+Base HKA     = 0.06; IVA = 0.01
 ```
-    GENERAL:
-           55.866 = 55.87 | 55.865 = 55.87 | 55.864 = 55.86
-        
-    HKA:
-           55.866 = 55.87 | 55.865 = 55.87 | 55.864 = 55.86
-       
-    PNP:
-           55.866 = 55.86 | 55.865 = 55.86 | 55.864 = 55.86
+
+`summary()['bases']` siempre muestra bases finales agrupadas por alícuota para
+consulta y facturación. Esto no significa que GENERAL calcule IVA sobre esa base
+agrupada. **Bases idénticas con distintos `summary()['taxes']` son correctas y
+esperadas.** Los impuestos usan los nombres de `config('cart.taxes')`; `IVA` es
+el porcentaje y `value` es el importe del impuesto.
+
+**GENERAL usa la línea completa, incluida su cantidad:** con cantidad 2, precio
+10.23 e IVA del 16%, la base es `2 × 10.23 = 20.46`; el IVA es `3.2736 → 3.27`.
+Redondear primero el IVA unitario daría `1.64 × 2 = 3.28`, que no corresponde a
+esta estrategia. La unidad fiscal es la línea completa, no cada unidad física.
+
+**HKA frente a PNP, dos líneas separadas de 0.039 con IVA del 16%:**
+
+```text
+HKA: 0.039 → 0.04 cada una; base = 0.08; IVA = 0.0128 → 0.01
+PNP: 0.039 → 0.03 cada una; base = 0.06; IVA = 0.0096 → 0.00
 ```
-Si desea cambiar estas opciones, deber&aacute; publicar el archivo de configuraci&oacute;n
+
+Consultar la [guía de ajustes](docs/adjustments.es.md#orden-matemático) para el
+orden completo. Para cambiar el driver, publicar el archivo de configuración.
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
@@ -150,50 +191,95 @@ Puede operar el carrito de compras utilizando los siguientes m&eacute;todos:
 
 ### add
 
-Para agregar un art&iacute;culo al carrito de compras, simplemente use el m&eacute;todo `add()`, que acepta una variedad de par&aacute;metros.
+Usar `Cart::add()` para incorporar una línea comercial al carrito. Devuelve el
+`CartItem` resultante. Los argumentos son código/id, nombre, cantidad, precio
+unitario sin IVA, alícuota y opciones. Si se omite la alícuota se usa
+`cart.default_aliquot`; una alícuota explícita debe existir en `cart.taxes`
+(claves predeterminadas: 0, 1, 2 y 3).
 
-En su forma m&aacute;s b&aacute;sica, puede especificar el id, nombre, la cantidad y el precio del producto que desea agregar al carrito.
+**Identidad de línea = código/id del producto + options + alícuota.**
+`name`, `price` y `qty` no forman parte de la identidad. Cualquier opción participa,
+incluidas `image`, `color`, `size`, `presentation` y `variant`; no son simples
+metadatos visuales.
 
-```
-   Cart::add('code','product name...',1,1.30);
-```
-
-De esta manera, se agregar&aacute; el art&iacute;culo y el monto del impuesto se calcular&aacute; utilizando la alicuota predeterminada definida por la propiedad default_aliquot en el archivo de configuraci&oacute;n.
-
-Opcionalmente, el quinto par&aacute;metro corresponde al identificador de la alicuota a aplicar, que toma valores de 0 a 4. Mientras tanto, el sexto par&aacute;metro es un conjunto de opciones que puedes utilizar seg&uacute;n tus necesidades, como proporcionar una URL de imagen para exhibir el producto.
-
-```
-    Cart::add('code','product name...',1,1.30,1,["image" => 'url image']);
-```
-
-**El m&eacute;todo `add()` devolver&aacute; una instancia de CartItem del art&iacute;culo que acaba de agregar al carrito.**
-
-Si prefiere agregar un elemento usando una matriz, siempre que la matriz contenga las claves requeridas, puede pasarlo al m&eacute;todo omitiendo el resto de los par&aacute;metros. Las claves de alícuota y opciones son opcionales.
-
-```
-    Cart::add(['id' => 'code', 'name' => 'product name...', 'qty' => 1, 'price' => 1.30, 'options' => ["image" => 'url image']]);
+```php
+Cart::add('P001', 'Martillo', 1, 10.00, 0, ['image' => '/img/martillo.jpg']);
+$item = Cart::add('P001', 'Martillo', 2, 10.00, 0, ['image' => '/img/martillo.jpg']);
+// Una línea P001: qty = 3, options.image = /img/martillo.jpg
 ```
 
-¿Qu&eacute; pasa si el mismo art&iacute;culo se env&iacute;a dos veces al carrito? En estos casos, se implementa una interfaz Comparable. Como resultado, en lugar de agregar dos art&iacute;culos separados al carrito, buscar&aacute; el art&iacute;culo existente e incrementar&aacute; su cantidad en la cantidad proporcionada.
+Repetir `add()` con la misma identidad completa reutiliza la línea y suma cantidad.
+Otras opciones o alícuotas generan identidades diferentes:
+
+```php
+Cart::add('P001', 'Martillo', 1, 10.00, 0, []);
+// Línea distinta de P001 con ['image' => '/img/martillo.jpg'].
+```
+
+**Consideración:** cambiar precio o nombre no crea otra identidad. Con el mismo
+código, opciones y alícuota, `add()` acumula cantidad y reemplaza los demás atributos
+por los recibidos en la nueva incorporación, incluidos precio y nombre. Para
+editar una línea existente, utilizar `update()`.
+
+La variante con array exige `id`, `name`, `qty` y `price`; `aliquot` y `options`
+son opcionales:
+
+```php
+Cart::add(['id' => 'P002', 'name' => 'Alicate', 'qty' => 1, 'price' => 12.00]);
+```
 
 ### update
 
-Para actualizar un art&iacute;culo en el carrito, necesitar&aacute; el rowId. Puede utilizar el m&eacute;todo `update()` para actualizarlo. Si solo desea actualizar la cantidad, pasar&aacute; el rowId y la nueva cantidad al m&eacute;todo de actualizaci&oacute;n.
+Usar `Cart::update()` para modificar una línea existente: cantidad desde los botones
+`+` / `−`, nombre, precio, alícuota, opciones o atributos proporcionados por un `Buyable`.
+Acepta `rowId` o un código de producto que identifique una única línea.
 
-
-
-```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';
-    Cart::update($rowId, 2);
-```
-
-Si desea actualizar m&aacute;s atributos del elemento, puede pasar una matriz o un Comparable como segundo par&aacute;metro al m&eacute;todo de actualizaci&oacute;n. De esta manera, puede actualizar toda la informaci&oacute;n del art&iacute;culo con el rowId proporcionado.
+Para el botón + del carrito, enviar la nueva cantidad:
 
 ```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';   
-    Cart::update($rowId, ['name' => 'new name']);
-    Cart::update($rowId, $product);
+$item = Cart::get($rowId);
+Cart::update($rowId, $item->qty + 1);
+
+// Alternativa cuando P001 identifica una única línea:
+$item = Cart::get('P001');
+Cart::update('P001', $item->qty + 1);
 ```
+
+No es necesario volver a llamar `add()` ni reenviar nombre, precio, alícuota,
+opciones o imagen. `update()` parte de la línea existente y conserva los atributos
+omitidos.
+
+Ejemplo independiente con imagen:
+
+```php
+$item = Cart::add(
+    'P001',
+    'Martillo',
+    1,
+    10.00,
+    0,
+    ['image' => '/img/martillo.jpg']
+);
+
+// Posteriormente, desde el carrito:
+Cart::update($item->rowId, 2);
+// Sólo cambia qty; conserva id, name, price, aliquot y options.image.
+```
+
+Esto conserva la imagen y la identidad. Volver a ejecutar
+`Cart::add('P001', 'Martillo', 1, 10.00, 0, [])` usaría otra identidad:
+`[]` no equivale a `['image' => '/img/martillo.jpg']`.
+
+Para otros cambios se admite un array parcial o un objeto que implemente `Buyable`:
+
+```php
+$item = Cart::update($rowId, ['name' => 'Nuevo nombre', 'price' => 11.00]);
+$item = Cart::update($item->rowId, $product); // $product implementa Buyable
+```
+
+Cambiar opciones o alícuota puede cambiar el `rowId`; conservar el identificador
+del objeto devuelto. Si la nueva identidad coincide con otra línea, se fusionan
+las cantidades. Una cantidad cero o negativa elimina la línea.
 
 ### content
 
@@ -212,12 +298,29 @@ Este m&eacute;todo devolver&aacute; el contenido de la instancia del carrito act
 
 ### get
 
-Si desea recuperar solo un art&iacute;culo del carrito, puede llamar al m&eacute;todo `get()` y pasarle el rowId.
+`get()`, `update()` y `remove()` aceptan `rowId` o código/id del producto. El código
+es válido únicamente cuando identifica una sola línea:
 
 ```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';   
-    Cart::get($rowId);
+Cart::get('P001');
+Cart::update('P001', 2);
+Cart::remove('P001');
 ```
+
+Si P001 tiene variantes roja y azul, u otras combinaciones de opciones/alícuota,
+`Cart::get('P001')` lanza `AmbiguousItemException`; lo mismo ocurre con `update()`
+y `remove()` usando ese código. Se debe indicar el `rowId` de la línea deseada.
+
+`rowId` identifica inequívocamente una línea del carrito. Conservarlo desde el
+`CartItem` devuelto o desde `content()`; la aplicación no debe calcularlo ni predecirlo.
+
+```php
+$item = Cart::get($rowId);
+```
+
+La búsqueda intenta primero el `rowId` exacto y después el código. Si no existe
+la línea, lanza `InvalidRowIDException`. La [guía de identidad](docs/adjustments.es.md#api-pública)
+detalla las búsquedas explícitas `getByRowId()` y `getById()`.
 
 ### search
 
@@ -245,7 +348,8 @@ Puede configurar el formato de n&uacute;mero predeterminado en el archivo de con
 
 ### tax
 
-El m&eacute;todo `tax()` se puede utilizar para obtener el importe calculado del impuesto para todos los art&iacute;culos del carrito, teniendo en cuenta el precio, la cantidad y el controlador configurado.
+`tax()` devuelve el IVA de las bases finales de productos y costos ITEM según el
+driver, incluidos prorrateos y descuentos. Excluye propina y costos legacy.
 
 ```php
     Cart::tax();
@@ -274,13 +378,14 @@ A continuaci&oacute;n se muestra un ejemplo de una respuesta con el controlador 
     }
 ```
 
-Puede configurar el formato de n&uacute;mero predeterminado en el archivo de configuraci&oacute;n.
+Los importes de IVA son numéricos; `cart.format` no los modifica.
 
 **Si no est&aacute;s usando Facade, pero usas la inyecci&oacute;n de dependencia en tu (por ejemplo) Controller, tambi&eacute;n puedes simplemente obtener la propiedad de impuesto `$cart->tax`**
 
 ### subtotal
 
-El m&eacute;todo `subtotal()` se puede utilizar para obtener el total de todos los art&iacute;culos del carrito, menos el importe total del impuesto.
+`subtotal()` devuelve la base final formateada de productos y costos ITEM, después
+de prorrateos y descuentos. Excluye IVA, propina y costos legacy.
 
 ```php
     Cart::subtotal();
@@ -306,7 +411,7 @@ Si desea agregar costos adicionales al carrito, puede utilizar el m&eacute;todo 
     Cart::addCost($name, $price)
 ```
 
-**Agregue este m&eacute;todo antes de resumir todo el carrito. Los costos no se guardan en la sesi&oacute;n (a&uacute;n).**
+Los costos persisten por instancia, también con store/restore. La llamada de dos argumentos conserva el recargo legado sin IVA. Use `addCost('freight', 10, 'prorated')` o `addCost('installation', 20, 'item', 0)` para indicar su tratamiento. `getCost()` sigue formateado; `costDetails()` devuelve las operaciones estructuradas.
 
 ### getCost
 
@@ -318,12 +423,15 @@ Obtenga un costo adicional que agreg&oacute; mediante `addCost()`. Acepta el nom
 
 ### remove
 
-Para eliminar un art&iacute;culo del carrito, debe pasar el rowId al m&eacute;todo `remove()` y este eliminar&aacute; el art&iacute;culo del carrito.
+Eliminar una línea mediante su `rowId` o un código que identifique una única línea:
 
 ```php
-    $rowId = '26d21fe340e373e8e7e20f87e0860b74';   
-    Cart::remove($rowId);
+Cart::remove($rowId);
+// Alternativa para un código único:
+Cart::remove('P001');
 ```
+
+Un código ambiguo lanza `AmbiguousItemException`; utilizar `rowId` para las variantes.
 
 ### destroy
 
