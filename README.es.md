@@ -1,4 +1,11 @@
 # Laravel Shopping Cart
+
+El carrito admite costos ITEM/PRORATED persistentes, propinas, descuentos por línea
+y documento, observaciones estructuradas y búsqueda segura por código. Consultar
+la [guía de ajustes y migración](docs/adjustments.es.md) para la API completa,
+orden matemático, precisión y cambios de compatibilidad. Usar `summary()` para
+las bases ajustadas de la factura; `content()` conserva los atributos originales.
+
 ### Compatibility:
 [![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
 [![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
@@ -174,7 +181,7 @@ Si prefiere agregar un elemento usando una matriz, siempre que la matriz conteng
     Cart::add(['id' => 'code', 'name' => 'product name...', 'qty' => 1, 'price' => 1.30, 'options' => ["image" => 'url image']]);
 ```
 
-¿Qu&eacute; pasa si el mismo art&iacute;culo se env&iacute;a dos veces al carrito? En estos casos, se implementa una interfaz Comparable. Como resultado, en lugar de agregar dos art&iacute;culos separados al carrito, buscar&aacute; el art&iacute;culo existente e incrementar&aacute; su cantidad en la cantidad proporcionada.
+Agregar nuevamente el mismo código, opciones y alícuota incrementa cantidad. Otras opciones o alícuotas generan líneas separadas. Los métodos que localizan una línea también aceptan su código cuando hay una sola coincidencia; los códigos ambiguos lanzan `AmbiguousItemException` y exigen `rowId`.
 
 ### update
 
@@ -306,7 +313,7 @@ Si desea agregar costos adicionales al carrito, puede utilizar el m&eacute;todo 
     Cart::addCost($name, $price)
 ```
 
-**Agregue este m&eacute;todo antes de resumir todo el carrito. Los costos no se guardan en la sesi&oacute;n (a&uacute;n).**
+Los costos persisten por instancia, también con store/restore. La llamada de dos argumentos conserva el recargo legado sin IVA. Use `addCost('freight', 10, 'prorated')` o `addCost('installation', 20, 'item', 0)` para indicar su tratamiento. `getCost()` sigue formateado; `costDetails()` devuelve las operaciones estructuradas.
 
 ### getCost
 

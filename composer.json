@@ -33,5 +33,12 @@
                 "Cart": "JeleDev\\Shoppingcart\\Facades\\Cart"
             }
         }
-    }
+    },
+    "require-dev": {
+        "phpunit/phpunit": "^10.5",
+        "illuminate/database": "^10.0 || ^11.0",
+        "illuminate/config": "^10.0 || ^11.0",
+        "vlucas/phpdotenv": "^5.6"
+    },
+    "scripts": {"test": "phpunit"}
 }

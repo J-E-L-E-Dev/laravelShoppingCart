@@ -1,4 +1,11 @@
 # Laravel Shopping Cart
+
+The cart now supports persistent ITEM/PRORATED costs, tips, line/document discounts,
+structured observations and safe lookup by product code. See the
+[adjustments and migration guide (Spanish)](docs/adjustments.es.md) for the complete
+API, calculation order, rounding rules and compatibility changes. Use `summary()`
+for adjusted invoice bases; `content()` retains original product attributes.
+
 ### Compatibility:
 [![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
 [![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
@@ -171,7 +178,7 @@ If you prefer to add an item using an array, as long as the array contains the r
     Cart::add(['id' => 'code', 'name' => 'product name...', 'qty' => 1, 'price' => 1.30, 'options' => ["image" => 'url image']]);
 ```
 
-What happens if the same item is sent to the cart twice? In these cases, a Comparable interface is implemented. As a result, instead of adding two separate items to the cart, it will search for the existing item and increment its quantity by the provided amount.
+Adding the same code, options and aliquot again increments quantity. Different options or aliquots produce separate lines. Methods targeting a line also accept its product code when exactly one line matches; ambiguous codes throw `AmbiguousItemException` and require `rowId`.
 
 ### update
 
@@ -302,7 +309,7 @@ If you want to add additional costs to the cart you can use the `addCost()` meth
     Cart::addCost($name, $price)
 ```
 
-**Add this method before summarizing the whole cart. The costs are not saved in the session (yet).**
+Costs persist per cart instance, including database store/restore. The two-argument call retains the legacy surcharge without tax. Use `addCost('freight', 10, 'prorated')` or `addCost('installation', 20, 'item', 0)` for explicit treatment. `getCost()` stays formatted; `costDetails()` returns structured operations.
 
 ### getCost
 

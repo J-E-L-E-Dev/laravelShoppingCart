@@ -8,99 +8,137 @@ use Illuminate\Contracts\Support\Jsonable;
 use Illuminate\Support\Arr;
 
 /**
- * @method price() Returns the formatted price without TAX.
- * @method priceTax() Returns the formatted price with TAX.
- * @method subtotal() Subtotal is price for whole CartItem without TAX
- * @method total() Total is price for whole CartItem with TAX
+ * Representa una línea original de producto y sus cálculos unitarios.
+ *
+ * El código id pertenece al consumidor; rowId identifica la línea dentro de
+ * Cart y puede conservar un hash de una versión anterior. La identidad vigente
+ * incluye id, opciones y alícuota, pero no nombre, cantidad ni precio.
+ * Los precios y getters de esta clase no incorporan los ajustes documentales:
+ * para facturar con costos o descuentos usar Cart::summary().
+ * Implementa Arrayable/Jsonable y puede asociar una clase de modelo para
+ * resolverla bajo demanda mediante la propiedad virtual model.
+ *
+ * @property-read string $subtotal Cantidad por precio original, con dos decimales y punto.
+ * @property-read string $total Cantidad por priceTax, con dos decimales y punto.
+ * @property-read int|float $tax IVA unitario calculado con la tasa conservada.
+ * @property-read string $taxTotal IVA unitario por cantidad, con dos decimales y punto.
+ * @property-read mixed $model Resultado de find(id) en el modelo asociado, o null.
  */
 class CartItem implements Arrayable, Jsonable
 {
     /**
-     * The rowID of the cart item.
+     * Identificador interno de la línea, distinto del código del producto.
+     *
+     * La aplicación debe utilizar el valor devuelto por Cart, sin generar ni
+     * predecir manualmente el hash. Puede diferir de identity() en snapshots antiguos.
      *
      * @var string
      */
     public $rowId;
 
     /**
-     * The ID of the cart item.
+     * Código del producto proporcionado por el consumidor; puede repetirse entre líneas.
      *
-     * @var int|string
+     * Se conserva sin convertir a número, incluidos ceros iniciales en strings.
+     * El constructor admite escalares no vacíos; el uso habitual es int|string.
+     *
+     * @var int|string|float|bool
      */
     public $id;
 
     /**
-     * The quantity for this cart item.
+     * Cantidad original de la línea; puede ser fraccionaria o un string numérico.
      *
-     * @var int|float
+     * El constructor no la establece; Cart la asigna al incorporar el producto.
+     *
+     * @var int|float|numeric-string|null
      */
     public $qty;
 
     /**
-     * The name of the cart item.
+     * Descripción original del producto utilizada para presentar la línea.
      *
      * @var string
      */
     public $name;
 
     /**
-     * The price without TAX of the cart item.
+     * Precio unitario original sin IVA, convertido a float al construir la línea.
+     *
+     * No contiene prorrateos ni descuentos de la liquidación documental.
      *
      * @var float
      */
     public $price;
 
     /**
-     * The aliquot for this cart item.
+     * Precio unitario original más IVA, recalculado por setTaxRate() y actualizaciones.
      *
-     * @var int
+     * Es una propiedad pública almacenada, no un getter dinámico. Una asignación
+     * directa a price no la actualiza automáticamente; puede ser null en snapshots antiguos.
+     *
+     * @var int|float|null
+     */
+    public $priceTax;
+
+    /**
+     * Clave de cart.taxes que define la tasa; no es el porcentaje de IVA.
+     *
+     * Puede ser null en datos antiguos antes de la normalización de Cart.
+     *
+     * @var int|string|null
      */
     public $aliquot;
 
     /**
-     * The options for this cart item.
+     * Opciones del producto que participan en la identidad de la línea.
      *
-     * @var array
+     * @var CartItemOptions
      */
     public $options;
 
     /**
-     * The FQN of the associated model.
+     * Nombre completo de la clase cuyo find(id) se invoca al consultar model.
      *
-     * @var string|null
+     * Se almacena la clase, no la instancia recibida en associate().
+     *
+     * @var class-string|null
      */
     private $associatedModel = null;
 
     /**
-     * The tax rate for the cart item.
+     * Porcentaje de IVA conservado desde cart.taxes mediante setTaxRate().
      *
-     * @var int|float
+     * @var int|float|numeric-string|null
      */
     private $taxRate = 0;
 
     /**
-     * CartItem constructor.
+     * Valida atributos, construye opciones e identidad e inicializa el precio con IVA.
      *
-     * @param int|string $id
-     * @param string     $name
-     * @param float      $price
-     * @param int        $aliquot
-     * @param array      $options
+     * Normaliza alícuota null con cart.default_aliquot y comprueba su clave en el
+     * catálogo. Convierte price a float y valida su rango mediante Money.
+     * No establece qty: el llamador debe asignarla con setQuantity().
+     *
+     * @param int|string|float|bool $id Código escalar cuya representación no sea vacía.
+     * @param string $name Descripción no vacía según empty().
+     * @param int|float|numeric-string $price Precio no negativo, finito y dentro del límite monetario.
+     * @param int|string|null $aliquot Clave del catálogo o null para usar la predeterminada.
+     * @param array<array-key, mixed> $options Opciones originales del producto.
+     * @throws \InvalidArgumentException Si identificador, nombre, precio, alícuota o impuesto no son válidos.
      */
     public function __construct($id, $name, $price, $aliquot, array $options = [])
     {
-        if(empty($id)) {
+        if(!is_scalar($id) || (string) $id === '') {
             throw new \InvalidArgumentException('Please supply a valid identifier.');
         }
         if(empty($name)) {
             throw new \InvalidArgumentException('Please supply a valid name.');
         }
-        if(strlen($price) < 0 || ! is_numeric($price)) {
-            throw new \InvalidArgumentException('Please supply a valid price.');
-        }
-        if(strlen($price) < 0 || ! is_numeric($price)) {
-            throw new \InvalidArgumentException('Please supply a valid aliquot.');
-        }
+        if (!is_numeric($price) || !is_finite((float) $price) || $price < 0) throw new \InvalidArgumentException('Invalid price.');
+        Money::cents($price);
+        $aliquot = $aliquot === null ? config('cart.default_aliquot') : $aliquot;
+        if (!array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('Invalid aliquot.');
 
         $this->id       = $id;
         $this->name     = $name;
@@ -108,15 +146,15 @@ class CartItem implements Arrayable, Jsonable
         $this->aliquot  = $aliquot;
         $this->options  = new CartItemOptions($options);
         $this->rowId = $this->generateRowId($id, $options);
+        $this->setTaxRate($aliquot);
     }
 
     /**
-     * Returns the formatted price without TAX.
+     * Presenta el precio unitario original sin IVA con el formato de CartItem.
      *
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * Usa decimales y separador decimal de cart.format, sin separador de miles.
+     *
+     * @return string Precio formateado, sin ajustes documentales.
      */
     public function price()
     {
@@ -124,12 +162,11 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Returns the formatted price with TAX.
+     * Presenta la propiedad almacenada priceTax con el formato de CartItem.
      *
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * No recalcula el precio ni incorpora costos o descuentos documentales.
+     *
+     * @return string Precio unitario con IVA formateado.
      */
     public function priceTax()
     {
@@ -137,13 +174,12 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Returns the formatted subtotal.
-     * Subtotal is price for whole CartItem without TAX
+     * Presenta cantidad por precio original de la línea, sin IVA ni ajustes.
      *
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * La propiedad virtual subtotal primero cuantiza con number_format a dos
+     * decimales; este método aplica después el formato de presentación de CartItem.
+     *
+     * @return string Base original formateada; para la base fiscal final usar Cart::summary().
      */
     public function subtotal()
     {
@@ -151,13 +187,11 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Returns the formatted total.
-     * Total is price for whole CartItem with TAX
+     * Presenta cantidad por priceTax original, sin ajustes del documento.
      *
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * Utiliza el precio con IVA unitario conservado; no agrupa bases como Cart::summary().
+     *
+     * @return string Importe original con IVA, formateado.
      */
     public function total()
     {
@@ -165,12 +199,12 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Returns the formatted tax.
+     * Presenta el IVA unitario del precio original según la tasa conservada.
      *
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * No es el impuesto de la liquidación final de Cart.
+     *
+     * @return string IVA unitario formateado.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public function tax()
     {
@@ -178,12 +212,13 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Returns the formatted tax.
+     * Presenta IVA unitario por cantidad, sin ajustes documentales.
      *
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * Multiplica el impuesto unitario ya cuantizado; puede diferir del impuesto
+     * calculado sobre bases agrupadas por alícuota en Cart::summary().
+     *
+     * @return string IVA de la línea original formateado.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public function taxTotal()
     {
@@ -191,56 +226,72 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Set the quantity for this cart item.
+     * Asigna una cantidad numérica, finita y estrictamente positiva.
      *
-     * @param int|float $qty
+     * Conserva el tipo numérico recibido y no modifica rowId ni persiste sesión.
+     * Para eliminar una línea por cantidad cero utilizar Cart::update().
+     *
+     * @param int|float|numeric-string $qty Cantidad del producto.
+     * @return void
+     * @throws \InvalidArgumentException Si la cantidad no es positiva, numérica o finita.
      */
     public function setQuantity($qty)
     {
-        if(empty($qty) || ! is_numeric($qty))
+        if(!is_numeric($qty) || !is_finite((float) $qty) || $qty <= 0)
             throw new \InvalidArgumentException('Please supply a valid quantity.');
 
         $this->qty = $qty;
     }
 
     /**
-     * Update the cart item from a Buyable.
+     * Actualiza código, descripción y precio a partir del contrato Buyable.
      *
-     * @param Buyable $item
+     * Entrega el CartItemOptions actual a los métodos del contrato y delega en
+     * updateFromArray(), conservando cantidad, alícuota y opciones. Puede cambiar
+     * rowId; Cart::update() se ocupa de mover la clave y sus descuentos en sesión.
+     *
+     * @param Buyable $item Producto que proporciona los nuevos atributos.
      * @return void
+     * @throws \InvalidArgumentException Si identificador, nombre, precio, alícuota o impuesto no son válidos.
      */
     public function updateFromBuyable(Buyable $item)
     {
-        $this->id       = $item->getBuyableIdentifier($this->options);
-        $this->name     = $item->getBuyableDescription($this->options);
-        $this->price    = $item->getBuyablePrice($this->options);
-        $this->priceTax = $this->price + $this->tax;
+        $this->updateFromArray(['id' => $item->getBuyableIdentifier($this->options), 'name' => $item->getBuyableDescription($this->options), 'price' => $item->getBuyablePrice($this->options)]);
     }
 
     /**
-     * Update the cart item from an array.
+     * Valida y aplica atributos parciales manteniendo los omitidos.
      *
-     * @param array $attributes
+     * Construye una línea temporal para validar datos y recalcular identidad e IVA.
+     * Conserva el rowId anterior si identity() no cambia, incluso para hashes antiguos.
+     * Valida que qty sea numérica y finita, pero admite cero o negativos aquí:
+     * Cart::update() decide entonces eliminar la línea. No guarda sesión ni mueve
+     * claves de colección; conserva la asociación de modelo existente.
+     *
+     * @param array{id?: int|string, name?: string, price?: int|float|numeric-string, aliquot?: int|string|null, options?: array<array-key, mixed>, qty?: int|float|numeric-string} $attributes Atributos a sustituir.
      * @return void
+     * @throws \InvalidArgumentException Si identificador, nombre, precio, alícuota o impuesto no son válidos.
+     * @throws \InvalidArgumentException Si qty no es numérica o finita.
      */
     public function updateFromArray(array $attributes)
     {
-        $this->id       = Arr::get($attributes, 'id', $this->id);
-        $this->qty      = Arr::get($attributes, 'qty', $this->qty);
-        $this->name     = Arr::get($attributes, 'name', $this->name);
-        $this->price    = Arr::get($attributes, 'price', $this->price);
-        $this->aliquot  = Arr::get($attributes, 'aliquot', $this->aliquot);
-        $this->priceTax = $this->price + $this->tax;
-        $this->options  = new CartItemOptions(Arr::get($attributes, 'options', $this->options));
-
-        $this->rowId = $this->generateRowId($this->id, $this->options->all());
+        $updated = new self(Arr::get($attributes, 'id', $this->id), Arr::get($attributes, 'name', $this->name), Arr::get($attributes, 'price', $this->price), Arr::get($attributes, 'aliquot', $this->aliquot), (array) Arr::get($attributes, 'options', $this->options->all()));
+        $qty = Arr::get($attributes, 'qty', $this->qty);
+        if (!is_numeric($qty) || !is_finite((float) $qty)) throw new \InvalidArgumentException('Invalid quantity.');
+        $rowId = $this->identity() === $updated->identity() ? $this->rowId : $updated->rowId;
+        foreach (['id', 'name', 'price', 'aliquot', 'options', 'priceTax', 'taxRate'] as $field) $this->$field = $updated->$field;
+        $this->qty = $qty;
+        $this->rowId = $rowId;
     }
 
     /**
-     * Associate the cart item with the given model.
+     * Conserva el nombre de clase del modelo sin cargarlo ni comprobar su existencia.
      *
-     * @param mixed $model
-     * @return CartItem
+     * model invocará new Clase y find(id) cuando se consulte. Cart::associate()
+     * comprueba nombres de clases y persiste la colección; este método no lo hace.
+     *
+     * @param class-string|object $model Nombre de clase o instancia asociable.
+     * @return $this
      */
     public function associate($model)
     {
@@ -250,27 +301,55 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Set the tax rate.
+     * Configura la alícuota y carga su porcentaje de IVA desde cart.taxes.
      *
-     * @param int|float $taxRate
-     * @return CartItem
+     * Pese al nombre del parámetro, recibe una clave de catálogo, no un porcentaje.
+     * Null usa cart.default_aliquot. Si cambia su representación string actualiza
+     * aliquot y rowId; después recalcula taxRate y la propiedad pública priceTax.
+     * No mueve claves de sesión ni descuentos: sobre líneas de Cart usar Cart::setTax().
+     *
+     * @param int|string|null $taxRate Clave de la alícuota.
+     * @return $this
+     * @throws \InvalidArgumentException Si la alícuota no existe o Money rechaza el impuesto.
      */
     public function setTaxRate($taxRate)
     {
-        $this->taxRate = isset($taxRate) ? $this->getTaxRate($taxRate) : $this->getTaxRate(config('cart.default_aliquot'));
+        $aliquot = $taxRate === null ? config('cart.default_aliquot') : $taxRate;
+        if (!array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('Invalid aliquot.');
+        if ((string) $this->aliquot !== (string) $aliquot) {
+            $this->aliquot = $aliquot;
+            $this->rowId = $this->identity();
+        }
+        $this->taxRate = $this->getTaxRate($aliquot);
+        $this->priceTax = $this->price + $this->tax;
         return $this;
     }
 
+    /**
+     * Lee el porcentaje configurado de una alícuota sin asignarlo a la línea.
+     *
+     * No valida la existencia: config() devuelve null si falta la clave.
+     *
+     * @param int|string $aliquot Clave de cart.taxes.
+     * @return int|float|numeric-string|null Valor configurado o null.
+     */
     public function getTaxRate($aliquot)
     {
         return config('cart.taxes.'.$aliquot.'.value');
     }
 
     /**
-     * Get an attribute from the cart item or get the associated model.
+     * Resuelve propiedades virtuales y permite leer propiedades declaradas no accesibles.
      *
-     * @param string $attribute
-     * @return mixed
+     * Prioriza cualquier propiedad existente. Para subtotal, total y taxTotal usa
+     * number_format con dos decimales y punto; tax calcula IVA unitario con taxRate.
+     * model instancia la clase asociada y ejecuta find(id), por lo que puede consultar
+     * la base de datos. No aplica descuentos ni costos documentales.
+     * priceTax es pública y almacenada: su lectura ordinaria no ejecuta este método.
+     *
+     * @param string $attribute Nombre del atributo solicitado.
+     * @return mixed Valor declarado, importe, modelo o null para nombres desconocidos.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public function __get($attribute)
     {
@@ -309,6 +388,19 @@ class CartItem implements Arrayable, Jsonable
         return null;
     }
 
+    /**
+     * Calcula el IVA de una base numérica usando el driver configurado.
+     *
+     * Multiplica price por tax_rate / 100. GENERAL y HKA redondean la mitad hacia
+     * arriba a centavos; PNP trunca hacia cero. Un driver desconocido usa GENERAL.
+     * La tasa recibida ya es un porcentaje: este método no consulta su alícuota
+     * ni agrupa productos. Devuelve un número crudo, no un importe formateado.
+     *
+     * @param int|float|numeric-string $price Base sin IVA, unitaria o agrupada por el llamador.
+     * @param int|float|numeric-string $tax_rate Porcentaje de IVA.
+     * @return int|float Importe de IVA cuantizado a dos decimales.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
+     */
     public static function calculateTaxes($price, $tax_rate)
     {
         switch (config('cart.driver')) {
@@ -331,65 +423,95 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * General manufacturer tax calculation method
+     * Calcula base por porcentaje y redondea la mitad hacia arriba mediante Money::cents().
+     *
+     * GENERAL cuantiza el importe resultante a dos decimales.
+     *
+     * @param int|float|numeric-string $price Base sin IVA.
+     * @param int|float|numeric-string $tax_rate Porcentaje aplicable.
+     * @return int|float IVA numérico en unidades monetarias, no centavos.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     protected static function generalDriver($price, $tax_rate)
     {
-        return number_format($price * ($tax_rate / 100), 2, '.', '');
+        return Money::cents($price * ($tax_rate / 100)) / 100;
     }
 
     /**
-     * The Factory HKA manufacturer tax calculation method
-     * https://www.thefactoryhka.com/ve
+     * Calcula base por porcentaje y redondea la mitad hacia arriba mediante Money::cents().
+     *
+     * HKA comparte actualmente la cuantización de GENERAL; no consulta equipos fiscales.
+     *
+     * @param int|float|numeric-string $price Base sin IVA.
+     * @param int|float|numeric-string $tax_rate Porcentaje aplicable.
+     * @return int|float IVA numérico en unidades monetarias, no centavos.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     protected static function hkaDriver($price, $tax_rate)
     {
-        return sprintf("%1.2f", ($price * ($tax_rate / 100)));
+        return Money::cents($price * ($tax_rate / 100)) / 100;
     }
 
     /**
-     * PnP Developments manufacturer tax calculation method
-     * https://www.desarrollospnp.com/archivos
+     * Calcula base por porcentaje y trunca hacia cero mediante Money::cents().
+     *
+     * PNP conserva la política de truncamiento tras normalizar el ruido binario.
+     *
+     * @param int|float|numeric-string $price Base sin IVA.
+     * @param int|float|numeric-string $tax_rate Porcentaje aplicable.
+     * @return int|float IVA numérico en unidades monetarias, no centavos.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     protected static function pnpDriver($price, $tax_rate)
     {
-        return intval(($price * ($tax_rate / 100)) * 100) / 100;
+        return Money::cents($price * ($tax_rate / 100), true) / 100;
     }
 
     /**
-     * Create a new instance from a Buyable.
+     * Construye una línea original desde los atributos del contrato y la alícuota predeterminada.
      *
-     * @param Buyable $item
-     * @param array $options
-     * @return CartItem
+     * Entrega options como array a los tres métodos de Buyable.
+     * No asigna cantidad ni asocia el modelo; Cart realiza esos pasos.
+     *
+     * @param Buyable $item Producto que implementa el contrato.
+     * @param array<array-key, mixed> $options Opciones entregadas al producto y a la nueva línea.
+     * @return CartItem Línea nueva sin cantidad asignada.
+     * @throws \InvalidArgumentException Si identificador, nombre, precio, alícuota o impuesto no son válidos.
      */
     public static function fromBuyable(Buyable $item, array $options = [])
     {
-        return new self($item->getBuyableIdentifier($options), $item->getBuyableDescription($options), $item->getBuyablePrice($options), $options);
+        return new self($item->getBuyableIdentifier($options), $item->getBuyableDescription($options), $item->getBuyablePrice($options), config('cart.default_aliquot'), $options);
     }
 
     /**
-     * Create a new instance from the given array.
+     * Construye una línea desde id, name y price, con alícuota y opciones opcionales.
      *
-     * @param array $attributes
-     * @return CartItem
+     * No usa qty aunque el array la incluya; Cart la asigna por separado.
+     * Si falta aliquot utiliza cart.default_aliquot y, si falta options, un array vacío.
+     *
+     * @param array{id: int|string, name: string, price: int|float|numeric-string, aliquot?: int|string|null, options?: array<array-key, mixed>} $attributes Atributos del producto.
+     * @return CartItem Línea nueva sin cantidad asignada.
+     * @throws \InvalidArgumentException Si identificador, nombre, precio, alícuota o impuesto no son válidos.
      */
     public static function fromArray(array $attributes)
     {
         $options = Arr::get($attributes, 'options', []);
 
-        return new self($attributes['id'], $attributes['name'], $attributes['price'], $attributes['aliquot'], $options);
+        return new self($attributes['id'], $attributes['name'], $attributes['price'], Arr::get($attributes, 'aliquot', config('cart.default_aliquot')), $options);
     }
 
     /**
-     * Create a new instance from the given attributes.
+     * Construye una línea desde atributos individuales, sin asignar cantidad.
      *
-     * @param int|string $id
-     * @param string     $name
-     * @param float      $price
-     * @param int        $aliquot
-     * @param array      $options
-     * @return CartItem
+     * Delega validación, opciones, identidad y precio con IVA en el constructor.
+     *
+     * @param int|string $id Código de producto de la aplicación.
+     * @param string $name Descripción no vacía.
+     * @param int|float|numeric-string $price Precio unitario original sin IVA.
+     * @param int|string|null $aliquot Clave de alícuota o null para la predeterminada.
+     * @param array<array-key, mixed> $options Opciones que participan en la identidad.
+     * @return CartItem Línea nueva sin cantidad asignada.
+     * @throws \InvalidArgumentException Si identificador, nombre, precio, alícuota o impuesto no son válidos.
      */
     public static function fromAttributes($id, $name, $price, $aliquot, array $options = [])
     {
@@ -397,23 +519,46 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Generate a unique id for the cart item.
+     * Calcula la identidad vigente desde código, opciones y alícuota actuales.
      *
-     * @param string $id
-     * @param array  $options
-     * @return string
+     * No asigna rowId ni modifica el objeto. Puede diferir del rowId guardado en
+     * snapshots antiguos; Cart compara esta identidad para reutilizar aquella clave.
+     * No incluye nombre, cantidad, precio, modelo asociado ni ajustes documentales.
+     *
+     * @return string Hash MD5 vigente; no debe predecirse desde la aplicación.
+     */
+    public function identity()
+    {
+        return $this->generateRowId($this->id, $this->options->all());
+    }
+
+    /**
+     * Genera el hash interno de código, opciones serializadas y alícuota actual.
+     *
+     * Ordena una copia del primer nivel de options con ksort(), concatena id,
+     * serialize(options), ':' y aliquot como string, y calcula MD5.
+     * No ordena arrays anidados ni altera las opciones originales. Variantes de
+     * opciones o alícuotas pueden producir líneas distintas para el mismo código.
+     *
+     * @param int|string|float|bool $id Código del producto que se concatena al hash.
+     * @param array<array-key, mixed> $options Opciones a ordenar superficialmente.
+     * @return string Hash de identidad de línea, no identificador de negocio.
      */
     protected function generateRowId($id, array $options)
     {
         ksort($options);
 
-        return md5($id . serialize($options));
+        return md5($id . serialize($options) . ':' . (string) $this->aliquot);
     }
 
     /**
-     * Get the instance as an array.
+     * Exporta atributos originales y cálculos de la línea para Arrayable.
      *
-     * @return array
+     * No incluye modelo asociado, precio con IVA ni ajustes de Cart::summary().
+     * tax es IVA unitario numérico y subtotal es el string original de dos decimales.
+     *
+     * @return array{rowId: string, id: int|string|float|bool, name: string, qty: int|float|numeric-string|null, price: float, aliquot: int|string|null, options: array<array-key, mixed>, tax: int|float, subtotal: string}
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public function toArray()
     {
@@ -431,10 +576,15 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Convert the object to its JSON representation.
+     * Serializa toArray() mediante json_encode sin modificar los atributos.
      *
-     * @param int $options
-     * @return string
+     * Conserva el comportamiento de json_encode: puede devolver false o lanzar
+     * JsonException cuando el llamador utiliza JSON_THROW_ON_ERROR.
+     *
+     * @param int $options Opciones de codificación JSON.
+     * @return string|false JSON de los atributos originales o false ante fallo sin excepción.
+     * @throws \JsonException Si la codificación falla con JSON_THROW_ON_ERROR.
+     * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public function toJson($options = 0)
     {
@@ -442,13 +592,12 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Get the formatted number.
+     * Aplica el formato de presentación de la línea, siempre sin separador de miles.
      *
-     * @param float  $value
-     * @param int    $decimals
-     * @param string $decimalPoint
-     * @param string $thousandSeparator
-     * @return string
+     * Usa cart.format.decimals y decimal_point, con valores 2 y punto si son null.
+     *
+     * @param int|float|numeric-string|null $value Importe original o calculado a presentar.
+     * @return string Valor formateado.
      */
     private function numberFormat($value)
     {
