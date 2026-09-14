@@ -1,352 +1,1013 @@
-# Costos, descuentos e identidad de líneas
+# Costos, descuentos y liquidación fiscal
 
-## Auditoría de la versión anterior
+Esta guía documenta las funciones avanzadas de liquidación del carrito: costos adicionales, prorrateos, descuentos, observaciones, precisión monetaria, cálculo fiscal y persistencia.
 
-Esta sección describe la versión histórica anterior a `sprint-1`. Para el uso
-actual, consultar [API pública](#api-pública) y [Orden matemático](#orden-matemático).
+Para el uso general de `Cart::add()`, `Cart::update()`, identidad de líneas, `rowId` y configuración básica de los drivers fiscales, consulte `README.md` o `README.es.md`.
 
-`add()` construía un `CartItem` y sumaba cantidades si la colección contenía su
-`rowId`. Este era `md5(id . serialize(options))`, con `ksort()` solamente en el
-primer nivel de opciones. Nombre, precio, cantidad y alícuota no intervenían.
-Dos alícuotas podían fusionarse incorrectamente. La última incorporación
-reemplazaba los otros atributos de la línea.
+---
 
-`get()` buscaba exclusivamente la clave de colección. `update()` modificaba el
-objeto y movía su clave cuando cambiaban las opciones; podía dejar inconsistencias
-al eliminar simultáneamente una línea y cambiar su identidad. `remove()` usaba
-`get()`. No había resolución por código ni descuentos.
+## Costos adicionales
 
-`addCost()` acumulaba montos en `extraCosts`, una propiedad temporal compartida
-por las instancias de un mismo objeto. `getCost()` devolvía el monto formateado.
-Los costos solamente aumentaban el total, sin base ni IVA, y se perdían al recrear
-el servicio. `destroy()` solamente borraba productos.
+El paquete permite registrar costos adicionales asociados al documento mediante:
 
-`subtotal()` sumaba precios por cantidades. HKA redondeaba cada base de línea con
-`sprintf`, agrupaba cuatro alícuotas y redondeaba sus impuestos. PNP truncaba las
-bases e impuestos, pero su total seguía otra ruta. GENERAL acumulaba impuestos
-formateados en una sola categoría y calculaba totales desde precios con impuesto
-unitario. Eso podía producir discrepancias o errores al usar separadores de miles.
-La propiedad pública local `priceTax` impedía ejecutar su getter mágico y quedaba
-sin inicializar. Se conserva esa propiedad, ahora inicializada.
+```php
+Cart::addCost($name, $price, $mode = null, $aliquot = null, $description = null);
+```
 
-La sesión almacenaba `Collection<CartItem>` en `cart.<instancia>`. `store()`
-serializaba solamente esa colección; `restore()` superponía las líneas guardadas
-y eliminaba el registro de base de datos. `merge()` sumaba cantidades sin consumir
-el registro. Faltaba importar `Contracts\InstanceIdentifier`, la tabla configurada
-se ignoraba y `fromBuyable()` pasaba opciones en la posición de alícuota.
-No había tests ni dependencias de desarrollo.
+También puede utilizarse `amount` como argumento nombrado en PHP 8+:
 
-## Estructura y persistencia
+```php
+Cart::addCost(
+    name: 'packaging',
+    amount: 10,
+    mode: 'item',
+    aliquot: 1
+);
+```
 
-Se conserva `cart.<instancia>` como colección de productos. Una clave separada,
-`cart_metadata.<instancia>`, contiene tres listas de arrays:
+Los costos se almacenan como operaciones independientes. Varias operaciones con el mismo nombre pueden coexistir.
+
+Los modos principales son:
+
+* `ITEM`
+* `PRORATED`
+
+La propina tiene un tratamiento especial y los costos registrados sin modo mantienen el comportamiento legacy por compatibilidad.
+
+Constantes disponibles en `JeleDev\Shoppingcart\Cart`:
+
+```php
+Cart::COST_FREIGHT;
+Cart::COST_INSTALLATION;
+Cart::COST_PACKAGING;
+Cart::COST_INSURANCE;
+Cart::COST_TIP;
+
+Cart::COST_ITEM;
+Cart::COST_PRORATED;
+```
+
+También se conserva `COST_TRANSACTION` y pueden utilizarse nombres personalizados.
+
+### Costo ITEM
+
+Un costo `ITEM` representa un concepto facturable independiente.
+
+Ejemplo:
+
+```php
+Cart::addCost(
+    'installation',
+    20,
+    Cart::COST_ITEM,
+    0,
+    'Instalación'
+);
+```
+
+El costo requiere una alícuota explícita existente en `config('cart.taxes')`.
+
+Un ITEM:
+
+* incrementa el subtotal;
+* forma parte de la base fiscal;
+* puede generar IVA según su alícuota;
+* aparece en `summary()['costLines']`;
+* no se convierte internamente en un `CartItem`.
+
+Fiscalmente se comporta como una línea adicional del documento.
+
+Su tratamiento depende del driver:
+
+| Driver  | Tratamiento del costo ITEM                                         |
+| ------- | ------------------------------------------------------------------ |
+| GENERAL | Calcula el IVA del ITEM como una línea fiscal independiente        |
+| HKA     | Incorpora su base a la base acumulada de su alícuota               |
+| PNP     | Incorpora su base a la alícuota siguiendo la estrategia fiscal PNP |
+
+El importe registrado mediante `addCost()` ya se cuantiza a centavos con HALF_UP. En PNP no se vuelve a truncar el importe original del costo ITEM.
+
+### Costo PRORATED
+
+Un costo `PRORATED` se distribuye proporcionalmente entre las líneas de productos.
+
+Ejemplo:
+
+```php
+Cart::addCost(
+    'freight',
+    15,
+    Cart::COST_PRORATED
+);
+```
+
+No lleva una alícuota propia porque no constituye una línea fiscal independiente.
+
+El importe se distribuye entre las bases originales positivas de los productos y cada parte asignada hereda la alícuota del producto correspondiente.
+
+Conceptualmente:
+
+```text
+base original del producto
++ costo PRORATED asignado
+= nueva base del producto
+```
+
+Si existen varios costos PRORATED, todos utilizan las mismas bases originales como pesos de distribución.
+
+La suma de las asignaciones siempre coincide exactamente con el importe del costo cuantizado.
+
+Una vez incorporado a las bases de los productos, el PRORATED no se vuelve a sumar al subtotal o al total.
+
+Un costo PRORATED positivo puede registrarse antes de agregar productos. Si al momento de liquidar no existe una base positiva sobre la cual distribuirlo, se produce `DomainException`.
+
+### Propina
+
+La propina se registra mediante:
+
+```php
+Cart::addCost('tip', 5);
+```
+
+La propina:
+
+* incrementa el total final;
+* no incrementa la base fiscal;
+* no genera IVA;
+* no se prorratea;
+* no genera un `CartItem`;
+* no aparece como costo ITEM;
+* genera una observación de tipo `tip`.
+
+No admite modo ni alícuota.
+
+Puede consultarse separadamente mediante:
+
+```php
+Cart::summary()['tip'];
+```
+
+### Costos legacy
+
+Por compatibilidad se mantiene:
+
+```php
+Cart::addCost($name, $price);
+```
+
+cuando el nombre no corresponde al tratamiento especial de propina y no se proporciona un modo.
+
+Este costo conserva el comportamiento histórico:
+
+* incrementa el total;
+* no incrementa el subtotal;
+* no forma parte de una base fiscal;
+* no genera IVA.
+
+Para nuevas integraciones se recomienda indicar explícitamente `ITEM` o `PRORATED` cuando corresponda.
+
+### Consultar costos
+
+La API disponible incluye:
+
+```php
+Cart::costs();
+Cart::costDetails('freight');
+Cart::getCost('freight');
+Cart::totalCost();
+```
+
+`costs()` devuelve las operaciones estructuradas.
+
+`costDetails()` permite obtener las operaciones asociadas a un nombre. Puede devolver varias porque los costos del mismo tipo pueden registrarse más de una vez.
+
+`getCost()` conserva por compatibilidad el retorno formateado y representa la suma de las operaciones del nombre solicitado.
+
+`totalCost()` devuelve el importe numérico total de los costos registrados, incluida la propina.
+
+> `totalCost()` es informativo. No debe sumarse nuevamente a `Cart::total()`, porque los costos ya son incorporados por la liquidación según su modalidad.
+
+---
+
+## Descuentos
+
+El paquete admite descuentos:
+
+* sobre una línea específica;
+* sobre el documento en general.
+
+Pueden coexistir múltiples descuentos y se aplican en el orden en que fueron registrados.
+
+Los tipos disponibles son:
+
+```text
+percentage
+fixed
+```
+
+### Descuento de línea
+
+Puede aplicarse mediante código de producto inequívoco:
+
+```php
+Cart::addDiscountToItem(
+    'A001',
+    'percentage',
+    5,
+    'Descuento especial'
+);
+```
+
+o mediante `rowId`:
+
+```php
+Cart::addDiscountToItem(
+    $rowId,
+    'fixed',
+    2,
+    'Cupón de línea'
+);
+```
+
+Los descuentos de línea se aplican después de incorporar los costos PRORATED asignados a esa línea.
+
+Por tanto:
+
+```text
+base original
++ PRORATED
+- descuentos de línea
+= saldo de línea
+```
+
+Un descuento fijo corresponde a la línea completa, no a cada unidad individual.
+
+### Descuento general
+
+Se registra mediante:
+
+```php
+Cart::addDiscount(
+    'percentage',
+    10,
+    'Pronto pago'
+);
+```
+
+o:
+
+```php
+Cart::addDiscount(
+    'fixed',
+    1,
+    'Cupón de documento'
+);
+```
+
+Los descuentos generales se aplican después de los descuentos de línea.
+
+Se distribuyen proporcionalmente entre los saldos restantes de los productos.
+
+No se aplican sobre:
+
+* costos ITEM;
+* propinas;
+* costos legacy.
+
+### Reglas de los descuentos
+
+Un porcentaje debe encontrarse entre:
+
+```text
+0 y 100
+```
+
+Un descuento fijo no puede ser negativo.
+
+Cuando un descuento fijo supera el saldo disponible, el importe efectivo se limita al saldo.
+
+Las bases fiscales nunca quedan negativas.
+
+El paquete diferencia entre:
+
+```text
+descuento solicitado
+```
+
+y:
+
+```text
+descuento efectivo
+```
+
+Esto permite conservar el registro original de la operación aunque el importe aplicable haya tenido que limitarse.
+
+Los descuentos generales registrados sobre un carrito sin productos tienen importe efectivo cero.
+
+### Consultar descuentos
+
+```php
+Cart::discounts();
+Cart::totalDiscount();
+```
+
+`discounts()` devuelve los registros y sus importes efectivos, incluyendo las asignaciones por `rowId` cuando corresponda.
+
+`totalDiscount()` devuelve el monto numérico efectivamente descontado.
+
+> `totalDiscount()` es informativo. No debe volver a restarse de `subtotal()` o `total()`, porque la liquidación ya incorporó los descuentos.
+
+---
+
+## Observaciones
+
+Se pueden agregar observaciones manuales:
+
+```php
+Cart::addObservation('Entregar por la tarde');
+```
+
+y consultarlas mediante:
+
+```php
+Cart::observations();
+```
+
+Las observaciones pueden incluir información generada por:
+
+* observaciones manuales;
+* propinas;
+* descuentos;
+* consolidación de descuentos.
+
+Los importes utilizados para generar observaciones automáticas se calculan a partir del estado actual del documento.
+
+Las observaciones no constituyen la fuente contable de los cálculos. El paquete nunca necesita interpretar el texto de una observación para determinar costos, descuentos, impuestos o totales.
+
+---
+
+## Liquidación con `summary()`
+
+Para construir el documento fiscal final debe utilizarse:
+
+```php
+$summary = Cart::summary();
+```
+
+`content()` continúa representando los `CartItem` comerciales y sus valores originales.
+
+Los costos PRORATED y descuentos no modifican destructivamente los precios originales almacenados en esos objetos.
+
+Por esa razón:
+
+> Para facturar un carrito que contenga costos, prorrateos o descuentos, utilice `summary()` como fuente de las bases fiscales finales.
+
+### Líneas de productos
+
+```php
+$summary['lines'];
+```
+
+contiene las líneas fiscales finales de los productos.
+
+Cada línea incluye información equivalente a:
 
 ```php
 [
-    'costs' => [
-        ['name' => 'freight', 'amount' => 10, 'cents' => 1000,
-         'mode' => 'prorated', 'aliquot' => null, 'description' => 'Flete'],
-    ],
-    'discounts' => [
-        ['rowId' => null, 'type' => 'percentage', 'value' => 10,
-         'concept' => 'Pronto pago'],
-    ],
-    'observations' => [
-        ['type' => 'manual', 'text' => 'Entregar por la tarde'],
-    ],
+    'rowId'     => '...',
+    'id'        => 'A001',
+    'original'  => 100.00,
+    'prorated'  => 10.00,
+    'discount'  => 15.00,
+    'base'      => 95.00,
+    'aliquot'   => 0,
 ]
 ```
 
-Una operación agrega un registro; varias operaciones con el mismo nombre de
-costo coexisten. No son modelos Eloquent. El trait `CartAdjustments` contiene la
-API documental y `Money` encapsula precisión y distribución.
+Conceptualmente:
 
-Los montos efectivos de los descuentos y las observaciones automáticas se derivan
-de estos registros cada vez que se consulta: nunca quedan desactualizados después
-de cambiar cantidades. No se analizan strings para hacer cálculos.
-
-`store()` guarda un sobre `['version' => 2, 'content' => ..., 'metadata' => ...]`
-en la columna existente. No requiere migración. `restore()` también lee colecciones
-antiguas. Conserva la superposición de productos por rowId y agrega los metadatos
-guardados después de los existentes; después consume el registro. Para reemplazar
-todo el documento, llamar `destroy()` antes de `restore()`.
-
-`merge()` suma productos y agrega costos, descuentos y observaciones; adapta los
-descuentos al identificador de la línea que sobreviva. Como antes, no consume el
-registro: repetir `merge()` vuelve a incorporar cantidades y metadatos.
-`destroy()` limpia ambas claves de la instancia. El borrado configurado al cerrar
-sesión elimina también los metadatos de todas las instancias.
-
-## API pública
-
-```php
-Cart::get($rowIdOrCode);
-Cart::update($rowIdOrCode, ['qty' => 2]);
-Cart::remove($rowIdOrCode);
-Cart::getByRowId($rowId); // exclusivamente clave interna
-Cart::getById('000123');  // una línea o excepción; no devuelve colección
-
-Cart::addCost('freight', 15, 'prorated');
-Cart::addCost('installation', 20, 'item', 0, 'Instalación');
-Cart::addCost('tip', 5);
-
-// PHP 8+: amount es un alias de price; no suministrar ambos.
-Cart::addCost(name: 'packaging', amount: 10, mode: 'item', aliquot: 1);
-
-Cart::addDiscountToItem('A001', 'percentage', 5, 'Descuento especial');
-Cart::addDiscountToItem($rowId, 'fixed', 2, 'Cupón de línea');
-Cart::addDiscount('percentage', 10, 'Pronto pago');
-Cart::addDiscount('fixed', 1, 'Cupón de documento');
-Cart::addObservation('Entregar por la tarde');
-
-Cart::content();          // Collection<CartItem>, atributos originales
-Cart::costs();            // colección estructurada de operaciones
-Cart::costDetails('freight'); // colección; puede haber varias operaciones
-Cart::getCost('freight'); // suma formateada, compatible
-Cart::totalCost();        // importe numérico de todos los costos, incluida propina
-Cart::discounts();        // registros + amount, cents y allocations por rowId
-Cart::totalDiscount();    // monto numérico efectivamente descontado
-Cart::observations();    // manuales, propinas, descuentos y consolidado
-Cart::summary();         // liquidación numérica completa
-Cart::subtotal();         // base final formateada, incluidos costos ITEM
-Cart::tax();              // array por nombre de alícuota, IVA y value numérico
-Cart::total();            // total final formateado
+```text
+original
++ prorated
+- discount
+= base
 ```
 
-Constantes disponibles en `JeleDev\Shoppingcart\Cart`: `COST_FREIGHT`,
-`COST_INSTALLATION`, `COST_PACKAGING`, `COST_INSURANCE`, `COST_TIP`, `COST_ITEM`,
-`COST_PRORATED`. Se conserva `COST_TRANSACTION` y los nombres personalizados.
+`base` es el valor fiscal final que debe utilizarse para esa línea.
 
-La resolución busca primero una coincidencia exacta por `rowId`; después compara
-el código como string, sin conversión numérica: `000123` es diferente de `123`.
-Entero `123` y string `"123"` designan el mismo código. Cero es válido.
-Varias coincidencias producen `AmbiguousItemException` antes de modificar nada;
-ninguna produce `InvalidRowIDException`. La regla también cubre `associate()`,
-`setTax()` y descuentos de línea.
-
-La identidad actual es **código/id + options + alícuota**. Nombre, precio y cantidad
-no intervienen. `add()` incorpora una línea comercial: si encuentra la misma
-identidad completa, conserva su rowId, suma cantidades y reemplaza los demás
-atributos por los recibidos, incluso cuando cambia el precio o el nombre.
-Todas las opciones participan, incluidas `image`, `color`, `size`, `presentation`
-y `variant`: una imagen no es un dato visual ajeno a la identidad.
+### Costos ITEM
 
 ```php
-Cart::add('P001', 'Martillo', 1, 10.00, 0, ['image' => '/img/martillo.jpg']);
-$item = Cart::add('P001', 'Martillo', 2, 10.00, 0, ['image' => '/img/martillo.jpg']);
-// Una línea con qty = 3 y la imagen conservada.
-Cart::add('P001', 'Martillo', 1, 10.00, 0, []);
-// Otra identidad: ahora el código P001 es ambiguo; usar rowId.
+$summary['costLines'];
 ```
 
-Para modificar una línea existente usar `update()`: cantidad desde los botones
-`+` / `−`, nombre, precio, alícuota, opciones o atributos de un `Buyable`. Conserva los
-atributos omitidos; para incrementar cantidad no hay que reenviar imagen ni otros
-datos mediante `add()`:
+contiene los costos ITEM que deben considerarse conceptos facturables adicionales.
+
+Estos conceptos permanecen separados de los `CartItem`.
+
+### Bases por alícuota
 
 ```php
-$item = Cart::get($rowId);
-Cart::update($rowId, $item->qty + 1);
-// Conserva id, name, price, aliquot y options.image.
-// También se admite el código si sólo existe una línea con ese código.
+$summary['bases'];
 ```
 
-`rowId` identifica inequívocamente la línea. Conservar el devuelto por `add()` o
-`update()`, o consultarlo en `content()`; no calcularlo ni predecirlo. Si hay
-variantes P001 roja/azul, `get('P001')`, `update('P001', 2)` y `remove('P001')`
-lanzan `AmbiguousItemException` y requieren el rowId correspondiente.
+representa las bases fiscales finales agrupadas por alícuota.
 
-Se mantiene el ordenamiento superficial de opciones, no se canonicalizan arrays
-anidados. Los rowId antiguos se conservan al leer, agregar o actualizar atributos
-sin cambio de identidad. Cambiar identidad mueve sus descuentos; fusionar líneas
-concatena sus descuentos y los aplica sobre la línea resultante. El descuento fijo
-es por línea completa, no por unidad. Eliminar una línea elimina sus descuentos.
-Usar `Cart::update()`/`Cart::setTax()` para cambiar identidad, no asignación directa
-de campos de los objetos en la colección.
+Por ejemplo:
+
+```php
+[
+    0 => 114.05,
+    1 => 49.50,
+]
+```
+
+Estas bases agrupadas son útiles para consulta y construcción del documento fiscal.
+
+Es importante distinguir las bases agrupadas de la estrategia utilizada para calcular el IVA.
+
+En particular:
+
+```text
+summary()['bases'] de GENERAL
+```
+
+puede ser idéntico a:
+
+```text
+summary()['bases'] de HKA
+```
+
+aunque sus impuestos sean diferentes.
+
+Esto es correcto porque GENERAL calcula IVA por línea mientras HKA calcula IVA sobre bases acumuladas.
+
+### Impuestos
+
+```php
+$summary['taxes'];
+```
+
+utiliza los nombres configurados en:
+
+```php
+config('cart.taxes');
+```
+
+Cada impuesto contiene:
+
+```php
+[
+    'IVA'   => 16.00,
+    'value' => 18.25,
+]
+```
+
+donde:
+
+* `IVA` es el porcentaje configurado;
+* `value` es el importe calculado según la estrategia del driver.
+
+```php
+$summary['tax'];
+```
+
+representa la suma monetaria de los impuestos calculados.
+
+### Totales
+
+La liquidación expone también:
+
+```php
+$summary['subtotal'];
+$summary['tax'];
+$summary['tip'];
+$summary['totalCost'];
+$summary['totalDiscount'];
+$summary['total'];
+```
+
+No debe reconstruirse el total sumando nuevamente `totalCost()` o restando nuevamente `totalDiscount()`.
+
+Estos valores ya fueron incorporados en la liquidación.
+
+---
 
 ## Orden matemático
 
-1. Base original de cada producto = cantidad × precio, cuantizada a centavos:
-   HALF_UP en GENERAL/HKA; truncamiento hacia cero en PNP.
-2. Cada costo PRORATED se reparte según las bases originales positivas; se suma a
-   los productos y hereda su alícuota. Varios prorrateos usan los mismos pesos.
-3. Descuentos de línea en orden de registro, sobre el saldo de esa línea.
-4. Descuentos generales en orden de registro, sobre los saldos de productos;
-   reparto proporcional por esas bases restantes.
-5. Cada costo ITEM se incorpora como otra línea fiscal, separado de los productos.
-6. Sobre las bases finales, cada driver aplica su estrategia de IVA indicada abajo,
-   mediante `CartItem::calculateTaxes()` y `config('cart.taxes')`.
-7. Se suman base final + IVA + propina + costos legados sin modo.
+La liquidación se realiza conceptualmente en el siguiente orden:
 
-Hasta obtener las bases finales se comparte el orden de prorrateos y descuentos,
-con la cuantización inicial propia del driver. La base final de producto es su
-base original cuantizada + prorrateos asignados − descuentos aplicables; los
-ajustes se calculan y reparten en centavos. Desde allí difiere la acumulación:
-
-| Driver | Base por línea de producto | IVA sobre las bases finales |
-| --- | --- | --- |
-| GENERAL | HALF_UP a 2 decimales | Calcula y redondea HALF_UP el IVA de cada línea fiscal; después suma por alícuota |
-| HKA | HALF_UP a 2 decimales | Suma bases por alícuota y calcula una vez su IVA, redondeado HALF_UP |
-| PNP | Truncamiento hacia cero a 2 decimales | Suma bases truncadas por alícuota y trunca hacia cero el IVA acumulado |
-
-Cada ITEM calcula IVA individual en GENERAL y se incorpora a la base de su
-alícuota en HKA/PNP. Sigue en `costLines`, sin convertirse en `CartItem`. Su importe
-ya llega cuantizado a centavos por `addCost()` con HALF_UP en todos los drivers;
-PNP no vuelve a truncar el importe original registrado. PRORATED ya forma parte
-de las bases finales de productos y no se vuelve a sumar al total.
-
-Los descuentos generales excluyen costos ITEM, propinas y costos legados. Los
-porcentajes deben estar entre 0 y 100; los fijos no pueden ser negativos. Un fijo
-superior al saldo se limita al saldo: las bases nunca quedan negativas. Se registra
-el descuento solicitado y se devuelve también el importe efectivo. Los descuentos
-generales en un carrito vacío tienen importe efectivo cero.
-
-Un ITEM exige alícuota explícita del catálogo. Un PRORATED rechaza alícuota propia
-y no genera una línea adicional. Un prorrateo positivo sin base distribuible lanza
-`DomainException` al liquidar; puede registrarse antes de agregar productos.
-La propina rechaza modo y alícuota, nunca genera IVA ni un `CartItem`, y produce una
-observación `type=tip`, `description`, `amount`, `text`.
-
-`summary()['lines']` permite construir las líneas fiscales de productos: `original`,
-`prorated`, `discount`, `base`, `aliquot`, `rowId`, `id`. `costLines` contiene los
-conceptos ITEM facturables. `bases` siempre muestra las bases finales agrupadas
-por alícuota para consulta/facturación, incluso en GENERAL, cuyo IVA se calcula
-por línea. `taxes` usa el nombre configurado de cada impuesto, con `IVA` como
-porcentaje y `value` como importe calculado por el driver; `tax` suma esos importes.
-Por tanto, GENERAL y HKA pueden devolver **bases idénticas e impuestos diferentes**:
-es correcto y esperado. La propina aparece en
-`tip` y en observaciones. **Para facturar ajustes usar `summary()`**, pues
-`content()` y los getters propios de `CartItem` conservan los precios originales.
-`totalTaxes($input, $taxes)` calcula solamente los productos recibidos, sin los
-metadatos del documento, con la misma estrategia de cada driver: GENERAL por
-fila completa, HKA por bases acumuladas y PNP por bases truncadas acumuladas.
-`tax()` devuelve el IVA final con ajustes.
-
-### Ejemplos fiscales de centavos
-
-Con dos líneas distintas de 0.03 e IVA del 16%:
+1. Se calcula la base original de cada producto:
 
 ```text
-GENERAL: 0.03 × 16% = 0.0048 → 0.00 en cada línea; suma IVA = 0.00
-HKA: (0.03 + 0.03) × 16% = 0.0096 → 0.01
-Bases GENERAL = 0.06; bases HKA = 0.06
-IVA GENERAL = 0.00; IVA HKA = 0.01
+cantidad × precio
 ```
 
-GENERAL toma la línea completa, no cada unidad física: cantidad 2 × precio 10.23
-= base 20.46; IVA 16% = 3.2736 → **3.27**. Calcular primero IVA unitario redondeado
-daría 1.64 × 2 = 3.28 y no corresponde a esta estrategia.
-
-Con dos líneas distintas de 0.039 e IVA del 16%:
+2. La base se cuantiza según el driver:
 
 ```text
-HKA: 0.039 → 0.04 cada línea; base = 0.08; IVA = 0.0128 → 0.01
-PNP: 0.039 → 0.03 cada línea; base = 0.06; IVA = 0.0096 → 0.00
+GENERAL → HALF_UP
+HKA     → HALF_UP
+PNP     → truncamiento hacia cero
 ```
 
-Estos casos corresponden a `tests/FiscalDriverTest.php`. Las líneas deben tener
-identidades distintas; dos `add()` con la misma identidad acumulan cantidad y
-constituyen una sola línea fiscal.
+3. Los costos PRORATED se distribuyen proporcionalmente entre las bases originales positivas.
 
-## Precisión y cambios de comportamiento
+4. Los costos PRORATED asignados se incorporan a las bases de los productos.
 
-El reparto usa centavos enteros, cociente y resto exactos, sin multiplicaciones que
-desborden; asigna los centavos restantes al mayor resto y desempata por rowId en
-orden lexicográfico. La suma de allocations coincide exactamente con el importe
-cuantizado. No depende del orden de inserción de productos.
+5. Se aplican los descuentos de línea en su orden de registro.
 
-Precios, cantidades y porcentajes siguen aceptando valores numéricos/floats por
-compatibilidad. `Money::cents()` elimina ruido binario hasta seis decimales del
-valor escalado y cuantiza a dos decimales. HKA y GENERAL usan mitad hacia arriba;
-PNP trunca bases e IVA hacia cero, corrigiendo casos como `0.29 * 100`.
-Los costos y descuentos usan centavos y mitad hacia arriba en todos los drivers.
-Los cálculos soportan importes individuales hasta 1.000.000.000 y enteros de 64 bits;
-no constituyen un motor decimal de precisión arbitraria. Los floats retornados
-pueden mostrar la representación binaria usual al sumarlos fuera del paquete:
-para comparar importes usar centavos, no igualdad de sumas de floats.
-`cart.format` afecta exclusivamente presentación, no la precisión contable.
+6. Se aplican los descuentos generales en su orden de registro y se distribuyen proporcionalmente entre los productos.
 
-Se conservan firmas posicionales, fachadas, eventos de operaciones habituales,
-colecciones de productos, count por cantidad, sesiones antiguas y getCost formateado.
-`addCost($name, $price)` sin modo mantiene su recargo histórico sin IVA ni subtotal,
-ahora persistente. Para nuevas operaciones especificar ITEM o PRORATED.
+7. Se obtienen las bases fiscales finales de los productos.
 
-Cambios a considerar al actualizar:
+8. Los costos ITEM se incorporan como líneas fiscales adicionales.
 
-- Los nuevos rowId incluyen alícuota; no generar ni predecir hashes en la aplicación.
-- GENERAL devuelve todas las alícuotas y suma el IVA redondeado de cada línea
-  fiscal final. No usa IVA unitario por cantidad ni IVA sobre bases agrupadas.
-  HKA calcula IVA después de agrupar bases por alícuota; PNP agrupa bases truncadas
-  y trunca el IVA final. Estas estrategias pueden producir diferencias de centavos.
-- Subtotal incorpora ajustes y costos ITEM. No volver a sumar totalCost ni restar
-  totalDiscount al total: ya están incluidos, salvo la separación informativa.
-- `calculateTaxes()` retorna números crudos; los métodos de presentación permanecen
-  formateados. La precisión de cálculo es de dos decimales aunque el formato cambie.
-- Los snapshots v2 requieren esta versión al restaurarse; versiones anteriores no
-  entienden el sobre. Esta versión sí lee los snapshots antiguos.
-- Se rechazan precios/costos negativos, alícuotas inválidas y valores no finitos.
-- Los métodos protegidos antiguos de totales ya no son puntos de extensión de la
-  liquidación pública; subclases que los sobrescriban deben adaptar `summary()`.
+9. Cada driver aplica su estrategia de cálculo del IVA.
 
-La declaración antigua de PHP/Laravel ya era inconsistente: exige Collections 10/11
-aunque anuncia Laravel 7–11 y PHP 7.2. No se amplía artificialmente esa compatibilidad.
-La suite nueva necesita PHP 8.1+ y prueba las dependencias Laravel 10/11.
+10. Se incorporan propina y costos legacy según sus reglas.
 
-## Escenario de referencia
+Conceptualmente:
 
-| Concepto | A GENERAL | B EXEMPT | Instalación GENERAL |
-| --- | ---: | ---: | ---: |
-| Base original | 100.00 | 50.00 | 20.00 |
-| Flete prorrateado | 10.00 | 5.00 | 0.00 |
-| Descuento de línea 5% | 5.50 | 0.00 | 0.00 |
-| Descuento general 10% | 10.45 | 5.50 | 0.00 |
-| Base final | 94.05 | 49.50 | 20.00 |
+```text
+cantidad × precio
+       │
+       ▼
+ base original
+       │
+       ▼
+ + PRORATED
+       │
+       ▼
+ - descuento de línea
+       │
+       ▼
+ - descuento general asignado
+       │
+       ▼
+ BASE FISCAL FINAL
+       │
+       ├───────────────┐
+       │               │
+ productos          costos ITEM
+       │               │
+       └───────┬───────┘
+               │
+               ▼
+      estrategia del driver
+               │
+               ▼
+              IVA
+               │
+               ▼
+       subtotal + IVA
+               │
+               ▼
+      + propina + legacy
+               │
+               ▼
+             TOTAL
+```
 
-Con driver HKA: base de alícuota GENERAL 114.05; exenta 49.50; subtotal 163.55;
-IVA de alícuota GENERAL 18.25;
-propina 5.00; total 186.80. Costos registrados: 40.00. Descuento efectivo: 21.45.
+---
 
-## Verificación y archivos
+## Estrategias fiscales
 
-Ejecutar `composer install` y `composer test`. La suite usa sesiones reales de
-Illuminate y SQLite en memoria, e incluye identidad, acumulación, búsqueda,
-ambigüedad, cambio de rowId, alícuotas, redondeo, descuentos, observaciones,
-aislamiento, destroy, snapshots antiguos y nuevos, merge y escenario completo.
+El driver configurado mediante:
 
-Archivos de implementación: `src/Cart.php`, `src/CartItem.php`,
-`src/ShoppingcartServiceProvider.php`; nuevos `src/CartAdjustments.php`,
-`src/Money.php`, `src/Exceptions/AmbiguousItemException.php`. Infraestructura:
-`composer.json`, `phpunit.xml`, `.gitignore`, `tests/bootstrap.php`, `tests/CartTest.php`
-y `tests/FiscalDriverTest.php`. Este último cubre las diferencias fiscales, bases
-iguales con IVA distinto, cantidades mayores que uno, alícuotas mixtas, ITEM,
-PRORATED, descuentos y exclusión de propina/legacy.
-Se actualizan los enlaces de ambos README y esta guía. No se alteran las tasas ni
-la migración existente.
+```php
+config('cart.driver');
+```
 
-Métodos agregados a Cart: `getByRowId`, `getById`, `costs`, `costDetails`,
-`totalCost`, `addDiscountToItem`, `addDiscount`, `discounts`, `totalDiscount`,
-`addObservation`, `observations`, `summary`. CartItem agrega `identity()`.
+no determina únicamente si un número se redondea o se trunca.
 
-Métodos modificados de Cart: `add`, `addCost`, `getCost`, `get`, `update`, `remove`,
-`setTax`, `content`, `destroy`, `subtotal`, `tax`, `total`, los cálculos internos
-de drivers, `store`, `restore`, `merge`, `addCartItem`, `getContent`,
-`createCartItem`, `getTableName`. En CartItem: constructor, `setQuantity`,
-`updateFromBuyable`, `updateFromArray`, `setTaxRate`, `fromBuyable`, `fromArray`,
-`generateRowId` y cálculos numéricos de los drivers. `associate()` adquiere la
-resolución por código a través de `get()` sin duplicar búsquedas.
+También determina cuándo se acumulan las bases antes de calcular el IVA.
 
-Resultado histórico de la suite inicial (PHP 8.2.28, PHPUnit 10.5.64), anterior
-a las pruebas específicas de drivers:
+| Driver  | Base por línea                        | Cálculo del IVA                                                                       |
+| ------- | ------------------------------------- | ------------------------------------------------------------------------------------- |
+| GENERAL | HALF_UP a 2 decimales                 | Calcula y redondea IVA por línea fiscal final; después suma                           |
+| HKA     | HALF_UP a 2 decimales                 | Agrupa bases finales por alícuota y calcula el IVA sobre la base acumulada            |
+| PNP     | Truncamiento hacia cero a 2 decimales | Agrupa bases truncadas por alícuota y trunca el IVA calculado sobre la base acumulada |
 
-| Dependencias Illuminate | Tests | Assertions | Resultado |
-| --- | ---: | ---: | --- |
-| 10.49.0 | 47 | 198 | Correcto |
-| 11.51.0 | 47 | 198 | Correcto |
+### GENERAL
 
-En aquella validación también pasaron `php -l` en src/tests y `git diff --check`.
-`composer validate` aceptó el manifiesto con la advertencia preexistente sobre
-`version`. Esos resultados históricos no representan la suite fiscal ampliada.
+GENERAL utiliza como unidad fiscal la línea completa.
 
-La validación documental actual con Illuminate 11.51.0, PHP 8.2.28 y PHPUnit
-10.5.64 ejecutó `composer test`: **75 tests y 871 assertions**, todos correctos.
-Incluye los 47 tests iniciales y 28 casos fiscales adicionales.
+Para un producto:
+
+```text
+cantidad × precio
+```
+
+produce la base inicial de la línea.
+
+Después de prorrateos y descuentos se obtiene su base fiscal final.
+
+El IVA se calcula independientemente para cada línea:
+
+```text
+IVA línea = base final línea × porcentaje
+```
+
+y se redondea HALF_UP a dos decimales.
+
+Finalmente se suman los IVA de las líneas correspondientes a cada alícuota.
+
+GENERAL no calcula el IVA unitario para posteriormente multiplicarlo por la cantidad.
+
+Tampoco calcula un único IVA sobre la suma de todas las bases de la alícuota.
+
+### HKA
+
+HKA cuantiza cada base de línea mediante HALF_UP a dos decimales.
+
+Después de obtener las bases fiscales finales:
+
+```text
+línea A
+línea B
+línea C
+   │
+   ▼
+agrupar por alícuota
+   │
+   ▼
+base acumulada
+   │
+   ▼
+calcular IVA
+   │
+   ▼
+HALF_UP a 2 decimales
+```
+
+Los costos ITEM se incorporan a la base acumulada de su alícuota.
+
+### PNP
+
+PNP utiliza truncamiento hacia cero para la cuantización de las bases de productos.
+
+Después:
+
+```text
+bases truncadas
+      │
+      ▼
+agrupar por alícuota
+      │
+      ▼
+base acumulada
+      │
+      ▼
+calcular IVA
+      │
+      ▼
+truncar a 2 decimales
+```
+
+Los costos ITEM registrados ya llegan cuantizados a centavos por `addCost()` y participan en la base de su alícuota.
+
+---
+
+## Precisión monetaria
+
+Los cálculos de ajustes utilizan centavos enteros siempre que es posible.
+
+La clase interna `Money` centraliza:
+
+* conversión a centavos;
+* HALF_UP;
+* truncamiento;
+* distribución proporcional;
+* tratamiento del residuo.
+
+Esto evita utilizar valores formateados como parte de operaciones matemáticas.
+
+`number_format()` y la configuración:
+
+```php
+config('cart.format');
+```
+
+se utilizan para presentación y no determinan la precisión contable.
+
+### Distribución exacta
+
+Los costos PRORATED y descuentos generales pueden requerir distribuir una cantidad de centavos entre varias líneas.
+
+El paquete utiliza distribución proporcional y asigna los centavos residuales determinísticamente.
+
+La suma de todas las asignaciones siempre debe cumplir:
+
+```text
+suma de allocations
+=
+importe total cuantizado
+```
+
+Cuando existen restos equivalentes, se utiliza `rowId` como criterio determinista de desempate.
+
+El resultado no depende del orden en que los productos fueron incorporados al carrito.
+
+### Floats
+
+Por compatibilidad, la API continúa aceptando valores numéricos y `float`.
+
+Internamente `Money::cents()` reduce el ruido binario antes de cuantizar los valores.
+
+Los `float` devueltos por una API PHP pueden volver a mostrar representación binaria al realizar operaciones externas.
+
+Para verificaciones monetarias exactas se recomienda comparar centavos en lugar de igualdad directa entre sumas de `float`.
+
+---
+
+## Persistencia
+
+Los productos continúan almacenándose en la sesión bajo:
+
+```text
+cart.<instancia>
+```
+
+Los metadatos documentales se almacenan separadamente bajo:
+
+```text
+cart_metadata.<instancia>
+```
+
+Los metadatos incluyen:
+
+```php
+[
+    'costs' => [],
+    'discounts' => [],
+    'observations' => [],
+]
+```
+
+Esto permite conservar costos, descuentos y observaciones sin convertirlos en productos del carrito.
+
+### `store()`
+
+`store()` persiste el carrito mediante un sobre versionado que contiene productos y metadatos.
+
+Conceptualmente:
+
+```php
+[
+    'version' => 2,
+    'content' => ...,
+    'metadata' => ...,
+]
+```
+
+La versión actual puede leer los registros históricos que contenían solamente la colección de productos.
+
+### `restore()`
+
+`restore()` recupera el carrito almacenado.
+
+Los productos restaurados se superponen según las reglas existentes de identidad y los metadatos almacenados se agregan a los metadatos actuales.
+
+Después de una restauración correcta, el registro persistido es consumido.
+
+Si se desea reemplazar completamente el carrito actual antes de restaurar otro:
+
+```php
+Cart::destroy();
+Cart::restore($identifier);
+```
+
+### `merge()`
+
+`merge()` incorpora un carrito almacenado al carrito actual.
+
+Los productos compatibles acumulan cantidades y los metadatos se agregan.
+
+Cuando una identidad cambia durante la fusión, los descuentos asociados se adaptan al `rowId` de la línea sobreviviente.
+
+`merge()` no consume el registro persistido.
+
+Por tanto, ejecutar repetidamente el mismo `merge()` vuelve a incorporar sus cantidades y metadatos.
+
+### `destroy()`
+
+```php
+Cart::destroy();
+```
+
+elimina tanto:
+
+```text
+cart.<instancia>
+```
+
+como:
+
+```text
+cart_metadata.<instancia>
+```
+
+para la instancia activa.
+
+---
+
+## Consideraciones al actualizar
+
+### `rowId`
+
+Las identidades actuales incluyen:
+
+```text
+código/id + options + alícuota
+```
+
+Por esta razón, un `rowId` generado por versiones anteriores puede diferir del que produciría actualmente una incorporación equivalente.
+
+Las aplicaciones consumidoras no deben generar, reconstruir ni predecir un `rowId`.
+
+Debe utilizarse el valor devuelto por el paquete.
+
+### `subtotal()`
+
+`subtotal()` representa actualmente la base final después de ajustes e incluye los costos ITEM.
+
+Por tanto, código consumidor antiguo que reconstruya manualmente el documento debe revisar esta semántica.
+
+### Costos y descuentos
+
+No realizar:
+
+```php
+$total = Cart::total() + Cart::totalCost();
+```
+
+ni:
+
+```php
+$total = Cart::total() - Cart::totalDiscount();
+```
+
+Los ajustes ya están incorporados en `total()`.
+
+`totalCost()` y `totalDiscount()` permiten consultar los componentes de la liquidación, no volver a aplicarlos.
+
+### `content()` frente a `summary()`
+
+`content()` representa las líneas comerciales originales.
+
+`summary()` representa la liquidación fiscal final después de:
+
+```text
+PRORATED
+descuentos
+ITEM
+IVA
+propina
+costos legacy
+```
+
+Para generar una factura con ajustes debe utilizarse `summary()`.
+
+### Snapshots
+
+Los snapshots actuales incluyen productos y metadatos.
+
+La versión actual puede restaurar snapshots antiguos que contenían únicamente productos.
+
+Las versiones antiguas del paquete no conocen la estructura versionada actual.
+
+---
+
+## Escenario completo de referencia
+
+Suponga:
+
+```text
+Producto A
+Base original: 100.00
+Alícuota: GENERAL
+
+Producto B
+Base original: 50.00
+Alícuota: EXEMPT
+
+Flete PRORATED: 15.00
+
+Instalación ITEM: 20.00
+Alícuota: GENERAL
+
+Descuento de línea sobre A: 5%
+
+Descuento general: 10%
+
+Propina: 5.00
+```
+
+La distribución y descuentos producen:
+
+| Concepto              | Producto A | Producto B | Instalación ITEM |
+| --------------------- | ---------: | ---------: | ---------------: |
+| Base original         |     100.00 |      50.00 |            20.00 |
+| Flete PRORATED        |      10.00 |       5.00 |             0.00 |
+| Descuento de línea 5% |       5.50 |       0.00 |             0.00 |
+| Descuento general 10% |      10.45 |       5.50 |             0.00 |
+| Base final            |      94.05 |      49.50 |            20.00 |
+
+Con driver HKA:
+
+```text
+Base GENERAL:
+94.05 + 20.00 = 114.05
+
+Base EXEMPT:
+49.50
+
+Subtotal:
+114.05 + 49.50 = 163.55
+
+IVA GENERAL 16%:
+114.05 × 16% = 18.248
+→ 18.25
+
+Propina:
+5.00
+
+Total:
+163.55 + 18.25 + 5.00
+= 186.80
+```
+
+Por tanto:
+
+```text
+Subtotal          163.55
+IVA                18.25
+Propina              5.00
+-------------------------
+Total              186.80
+```
+
+Los costos registrados suman:
+
+```text
+Flete        15.00
+Instalación  20.00
+Propina       5.00
+------------------
+Total costos 40.00
+```
+
+El descuento efectivo total es:
+
+```text
+21.45
+```
+
+Estos valores son componentes informativos de la misma liquidación y no deben volver a agregarse o restarse del total.
+
+---
+
+## Resumen de uso
+
+Para costos:
+
+```php
+Cart::addCost('freight', 15, Cart::COST_PRORATED);
+Cart::addCost('installation', 20, Cart::COST_ITEM, 0, 'Instalación');
+Cart::addCost('tip', 5);
+```
+
+Para descuentos:
+
+```php
+Cart::addDiscountToItem('A001', 'percentage', 5, 'Descuento especial');
+Cart::addDiscount('percentage', 10, 'Pronto pago');
+```
+
+Para observaciones:
+
+```php
+Cart::addObservation('Entregar por la tarde');
+```
+
+Para consultar la liquidación:
+
+```php
+$summary = Cart::summary();
+```
+
+Para construir una factura con ajustes, utilice principalmente:
+
+```php
+$summary['lines'];
+$summary['costLines'];
+$summary['bases'];
+$summary['taxes'];
+$summary['subtotal'];
+$summary['tax'];
+$summary['tip'];
+$summary['total'];
+```
+
+`content()` sigue siendo apropiado para consultar los productos originales del carrito; `summary()` es la fuente de la liquidación fiscal final.
