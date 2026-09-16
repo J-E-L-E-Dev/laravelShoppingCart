@@ -29,7 +29,7 @@ We can add the dependency in our `composer.json` file:
 
 ```json
     "require": {
-        "edwinylil1/laravelshoppingcart": "~1.0.0",
+        "edwinylil1/laravelshoppingcart": "~2.0.0",
     },
 ```
 
