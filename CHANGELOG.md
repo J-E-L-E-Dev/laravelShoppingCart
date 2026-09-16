@@ -6,6 +6,39 @@ All notable changes to this project will be documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [2.0.1] - 2026-09-16
+
+### Fixed
+
+- Corrected the PHP and Illuminate compatibility constraints declared by the package.
+- Removed obsolete Laravel 7, 8, and 9 compatibility declarations.
+- Aligned runtime and development Illuminate dependencies with the versions actually supported by the package.
+
+### Added
+
+- Official compatibility with Laravel / Illuminate 12.
+- Automated compatibility testing across supported PHP and Illuminate versions using GitHub Actions.
+
+### Compatibility
+
+The package is now automatically tested with the following compatibility matrix:
+
+- Laravel / Illuminate 10:
+  - PHP 8.1
+  - PHP 8.2
+  - PHP 8.3
+  - PHP 8.4
+- Laravel / Illuminate 11:
+  - PHP 8.2
+  - PHP 8.3
+  - PHP 8.4
+- Laravel / Illuminate 12:
+  - PHP 8.2
+  - PHP 8.3
+  - PHP 8.4
+
+PHP 8.1 remains the minimum package requirement. Laravel / Illuminate 11 and 12 require PHP 8.2 or later.
+
 ## [2.0.0] - 2026-09-15
 
 ### Added
