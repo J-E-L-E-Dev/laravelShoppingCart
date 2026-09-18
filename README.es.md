@@ -7,11 +7,9 @@ orden matemático, precisión y cambios de compatibilidad. Usar `summary()` para
 las bases ajustadas de la factura; `content()` conserva los atributos originales.
 
 ### Compatibility:
-[![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
-[![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
-[![Laravel 9.x](https://img.shields.io/badge/Laravel-9.x-red.svg)](https://laravel.com/docs/9.x)
 [![Laravel 10.x](https://img.shields.io/badge/Laravel-10.x-red.svg)](https://laravel.com/docs/10.x)
 [![Laravel 11.x](https://img.shields.io/badge/Laravel-11.x-red.svg)](https://laravel.com/docs/11.x)
+[![Laravel 12.x](https://img.shields.io/badge/Laravel-12.x-red.svg)](https://laravel.com/docs/12.x)
 
 [![Latest Stable Version](http://poser.pugx.org/edwinylil1/laravelshoppingcart/v)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
 [![Total Downloads](http://poser.pugx.org/edwinylil1/laravelshoppingcart/downloads)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
@@ -38,29 +36,6 @@ o ejecutar
 ```bash
     composer require edwinylil1/laravelshoppingcart
 ```
-
-### Laravel <= 7.0
-
-Si usa la versión 7.0 de Laravel, debe agregar el service provider del paquete y asignarle un alias. Para hacer esto, abra su archivo config/app.php
-
-
-```bash
-nano config/app.php
-```
-
-### Agregue una nueva línea a la matriz providers:
-
-```bash
-JeleDev\Shoppingcart\ShoppingcartServiceProvider::class
-```
-
-Y agregue una nueva l&iacute;nea a la matriz `aliases`:
-
-```bash
-'Cart' => JeleDev\Shoppingcart\Facades\Cart::class,
-```
-
-Ahora est&aacute;s listo para comenzar a usar el carrito de compras en tu aplicaci&oacute;n.
 
 ## Gu&iacute;a del usuario
 
@@ -113,53 +88,61 @@ Puede modificar las propiedades name y value seg&uacute;n sus necesidades.
 
 Para Venezuela, el paquete soporta el c&aacute;lculo de facturas para los proveedores fiscales 'The Factory HKA' y 'Desarrollos PNP'
 
-Hay tres drivers; HKA es el predeterminado. `config('cart.driver')` determina tanto
-cómo se cuantizan bases e impuestos como cuándo se acumulan las bases antes del IVA.
+Hay tres drivers; HKA es el predeterminado. `cart.format.decimals` controla tanto
+presentación como precisión monetaria/fiscal: entero entre **0 y 4**, por defecto **2**.
+Los ejemplos siguientes usan dos decimales e IVA del 16%.
 
-| Driver | Base por línea de producto | Cálculo del IVA |
+| Driver | Base del producto | Cálculo del IVA |
 | --- | --- | --- |
-| GENERAL | HALF_UP a 2 decimales | Redondea IVA por cada línea fiscal final y luego suma por alícuota |
-| HKA | HALF_UP a 2 decimales | Agrupa bases finales por alícuota y redondea su IVA |
-| PNP | Truncamiento hacia cero a 2 decimales | Agrupa bases truncadas por alícuota y trunca el IVA |
+| GENERAL | HALF_UP a la precisión configurada | HALF_UP del IVA por línea fiscal final; suma por alícuota |
+| HKA | HALF_UP a la precisión configurada | Agrupa bases por alícuota y redondea IVA HALF_UP; reconcilia impuestos individuales |
+| PNP | Truncada para subtotal; conserva cantidad × precio sin cuantizar para IVA | Trunca IVA por línea fiscal y luego suma; nunca calcula IVA sobre base agrupada |
 
-Primero se cuantiza `cantidad × precio`; después se suma el PRORATED asignado y
-se restan los descuentos de línea y generales aplicables para obtener la base
-final del producto. Repartos y descuentos operan en centavos. Cada costo ITEM es
-otra línea fiscal: GENERAL calcula su IVA individualmente; HKA y PNP lo incorporan
-a la base acumulada de su alícuota. El importe ITEM ya se redondea a centavos al
-registrarlo. PRORATED ya está incluido en las bases y no se vuelve a sumar.
-Propina y costos legacy aumentan el total sin integrar bases ni generar IVA.
+GENERAL: cantidad 2 × precio 10.23 da base 20.46 e IVA de fila 3.2736 → **3.27**,
+no IVA unitario redondeado 1.64 × 2 = 3.28. Dos líneas distintas de 0.03 producen
+IVA 0.00 + 0.00 en GENERAL; HKA calcula `(0.03 + 0.03) × 16% → 0.01`.
+`summary()['bases']` sigue agrupado para todos los drivers: bases iguales pueden
+producir distintos `summary()['taxes']`. Los nombres de impuestos vienen de `cart.taxes`.
 
-**GENERAL frente a HKA, dos líneas separadas de 0.03 con IVA del 16%:**
+PNP: dos líneas de 0.04 producen cada una `truncar(0.04 × 16%) = 0.00`; el IVA
+total es **0.00**, no el IVA agrupado 0.01. PNP no trunca la entrada antes de
+calcular IVA: cantidad 3 × precio 0.023 da base sin cuantizar 0.069 e IVA **0.01**,
+aunque la base presentada en subtotal es 0.06.
 
-```text
-GENERAL: 0.03 × 16% = 0.0048 → 0.00 por cada línea; IVA = 0.00
-HKA:     (0.03 + 0.03) × 16% = 0.0096 → 0.01
+**`CartItem::tax` ahora representa el IVA de la fila original completa.** Aplica a
+`toArray()`, `toJson()` y `json_encode(Cart::content())`. `taxTotal` formatea ese
+mismo importe; `total` es base de fila cuantizada más IVA de fila. `price` sigue
+siendo unitario; `unitTax` y `priceTax = price + unitTax` son conceptos unitarios
+separados. No volver a multiplicar `item.tax` por cantidad.
 
-Base GENERAL = 0.06; IVA = 0.00
-Base HKA     = 0.06; IVA = 0.01
-```
+HKA reconcilia los IVA provisionales con el IVA fiscal agrupado, separadamente
+por alícuota. Ejemplo: A, cantidad 3 × 0.34, tiene base 1.02 e IVA provisional
+0.16; B, cantidad 1 × 0.89, tiene IVA provisional 0.14. El IVA agrupado es
+`1.91 × 16% → 0.31`, por lo que **A.tax = 0.17 y B.tax = 0.14**.
+Toda la diferencia, con su signo, se asigna a la fila de mayor IVA provisional,
+luego mayor base cuantizada y finalmente menor rowId lexicográfico. Se recalcula
+sobre productos originales, independientemente de los ajustes documentales.
 
-`summary()['bases']` siempre muestra bases finales agrupadas por alícuota para
-consulta y facturación. Esto no significa que GENERAL calcule IVA sobre esa base
-agrupada. **Bases idénticas con distintos `summary()['taxes']` son correctas y
-esperadas.** Los impuestos usan los nombres de `config('cart.taxes')`; `IVA` es
-el porcentaje y `value` es el importe del impuesto.
+`content()`, `get()`, `getById()` y `getByRowId()` conservan los objetos originales
+y proveen contexto fiscal derivado sin persistir impuestos sobrescritos. Un
+CartItem independiente o separado de la colección sólo tiene su IVA HKA provisional;
+consultarlo mediante Cart para reconciliarlo con la colección vigente.
 
-**GENERAL usa la línea completa, incluida su cantidad:** con cantidad 2, precio
-10.23 e IVA del 16%, la base es `2 × 10.23 = 20.46`; el IVA es `3.2736 → 3.27`.
-Redondear primero el IVA unitario daría `1.64 × 2 = 3.28`, que no corresponde a
-esta estrategia. La unidad fiscal es la línea completa, no cada unidad física.
+En `summary()`, PRORATED y descuentos ya integran las bases finales de productos.
+PNP aplica esos ajustes asignados a la base sin cuantizar antes de truncar el IVA
+por fila. Cada ITEM es otra línea fiscal: GENERAL redondea su IVA, PNP lo trunca
+y HKA incorpora su base al cálculo agrupado. Los costos se registran con HALF_UP
+a la precisión configurada. Propina y legacy no generan IVA.
 
-**HKA frente a PNP, dos líneas separadas de 0.039 con IVA del 16%:**
+Money utiliza unidades menores enteras: 100 por unidad monetaria con precisión 2,
+1000 con precisión 3. Los campos históricos `cents` y `Money::cents()` conservan
+el nombre pero usan la escala configurada. `allocations` usa la misma escala.
+Snapshots v3 y metadatos de sesión guardan la precisión; los enteros legacy/v2 se
+interpretan con precisión 2 y se convierten: `cents = 123` histórico sigue siendo
+**1.23**, no 0.123. Reducir precisión redondea cada operación almacenada HALF_UP.
 
-```text
-HKA: 0.039 → 0.04 cada una; base = 0.08; IVA = 0.0128 → 0.01
-PNP: 0.039 → 0.03 cada una; base = 0.06; IVA = 0.0096 → 0.00
-```
-
-Consultar la [guía de ajustes](docs/adjustments.es.md#orden-matemático) para el
-orden completo. Para cambiar el driver, publicar el archivo de configuración.
+Consultar la [guía de ajustes y migración](docs/adjustments.es.md) para fórmulas,
+conversión de precisión y límites de reconciliación HKA. Para cambiar configuración, publicarla:
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
@@ -378,7 +361,7 @@ A continuaci&oacute;n se muestra un ejemplo de una respuesta con el controlador 
     }
 ```
 
-Los importes de IVA son numéricos; `cart.format` no los modifica.
+Los importes de IVA son numéricos; `cart.format.decimals` controla su precisión. Los separadores sólo afectan la presentación.
 
 **Si no est&aacute;s usando Facade, pero usas la inyecci&oacute;n de dependencia en tu (por ejemplo) Controller, tambi&eacute;n puedes simplemente obtener la propiedad de impuesto `$cart->tax`**
 

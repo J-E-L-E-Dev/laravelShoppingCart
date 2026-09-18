@@ -2,47 +2,107 @@
 namespace JeleDev\Shoppingcart;
 
 /**
- * Encapsula la conversión monetaria a centavos y el reparto proporcional exacto.
+ * Encapsula la conversión monetaria a unidades menores y el reparto proporcional exacto.
  *
  * Cart y CartItem conservan entradas numéricas por compatibilidad; esta clase
- * fija la frontera de dos decimales y evita usar presentación como contabilidad.
+ * fija la frontera de precisión configurada y evita usar presentación como contabilidad.
  * Los repartos operan con enteros y se convierten a unidades monetarias solo
  * al devolver consultas. No es un motor decimal de precisión arbitraria:
- * cents() convierte la entrada a float y el rango entero depende de PHP.
+ * minorUnits() convierte la entrada a float y el rango entero depende de PHP.
  * Los importes cercanos al límite admitido requieren enteros de 64 bits.
  */
 final class Money
 {
+    /** Máximo de decimales: escala 10000, con margen entero para reparto en PHP de 64 bits. */
+    public const MAX_DECIMALS = 4;
+
+    /** Valida la precisión contable; sólo admite enteros entre 0 y 4. */
+    public static function decimals($decimals = null)
+    {
+        $decimals = $decimals ?? config('cart.format.decimals', 2);
+        if (!is_int($decimals) || $decimals < 0 || $decimals > self::MAX_DECIMALS) {
+            throw new \InvalidArgumentException('cart.format.decimals must be an integer between 0 and 4.');
+        }
+        return $decimals;
+    }
+
+    /** Escala única para importes, impuestos y ajustes. */
+    public static function scale($decimals = null)
+    {
+        return 10 ** self::decimals($decimals);
+    }
+
+    /** Convierte importes a unidades menores; HALF_UP o truncamiento hacia cero. */
+    public static function minorUnits($value, $truncate = false, $decimals = null)
+    {
+        $scale = self::scale($decimals);
+        if (!is_numeric($value) || !is_finite((float) $value) || abs((float) $value) > 1000000000) {
+            throw new \InvalidArgumentException('Invalid monetary value (maximum absolute amount: 1 billion).');
+        }
+        $scaled = round((float) $value * $scale, 6);
+        if (abs($scaled) > intdiv(PHP_INT_MAX, 4)) {
+            throw new \InvalidArgumentException('Amount exceeds the supported integer range.');
+        }
+        return (int) ($truncate ? ($scaled < 0 ? ceil($scaled) : floor($scaled)) : round($scaled, 0, PHP_ROUND_HALF_UP));
+    }
+
+    /** Devuelve un importe numérico desde unidades menores de una precisión conocida. */
+    public static function fromMinorUnits($units, $decimals = null)
+    {
+        if (!is_int($units)) throw new \InvalidArgumentException('Minor units must be integers.');
+        return $units / self::scale($decimals);
+    }
+
+    /** Convierte escalas sin floats; reducir precisión redondea HALF_UP hacia afuera en empates. */
+    public static function rescale($units, $from, $to)
+    {
+        $source = self::scale($from);
+        $target = self::scale($to);
+        if (!is_int($units) || $units === PHP_INT_MIN) throw new \InvalidArgumentException('Invalid minor units.');
+        if ($target >= $source) {
+            $factor = intdiv($target, $source);
+            if (abs($units) > intdiv(PHP_INT_MAX, 4 * $factor)) throw new \InvalidArgumentException('Scale conversion overflow.');
+            return $units * $factor;
+        }
+        $factor = intdiv($source, $target);
+        $absolute = abs($units);
+        $result = intdiv($absolute, $factor) + (($absolute % $factor) * 2 >= $factor ? 1 : 0);
+        return $units < 0 ? -$result : $result;
+    }
+
+    /** Suma unidades menores rechazando desbordamientos en lugar de producir floats. */
+    public static function sum(array $units)
+    {
+        $sum = array_sum($units);
+        if (!is_int($sum)) throw new \InvalidArgumentException('Minor unit sum overflow.');
+        return $sum;
+    }
     /**
-     * Convierte un importe numérico a centavos con redondeo o truncamiento.
+     * Alias histórico compatible: cents representa unidades menores de la precisión configurada.
      *
      * Admite valores negativos en este auxiliar; son los consumidores los que
      * restringen precios, costos o bases. Rechaza no numéricos, no finitos y valores
-     * absolutos superiores a 1.000.000.000. Multiplica por 100 como float y redondea
+     * absolutos superiores a 1.000.000.000. Multiplica por scale() como float y redondea
      * el valor escalado a seis decimales para reducir ruido de representación.
      * Después usa mitad hacia arriba o truncamiento hacia cero; devuelve un int.
      * No acepta strings con separadores de presentación que no sean numéricos.
      *
      * @param int|float|numeric-string $value Importe en unidades monetarias.
      * @param bool $truncate True para truncar; false para redondear la mitad hacia arriba.
-     * @return int Importe en centavos, con su signo.
+     * @return int Importe en unidades menores, con su signo.
      * @throws \InvalidArgumentException Si el valor no es numérico, finito o está fuera del límite.
      */
     public static function cents($value, $truncate = false)
     {
-        if (!is_numeric($value) || !is_finite((float) $value) || abs((float) $value) > 1000000000) {
-            throw new \InvalidArgumentException('Invalid monetary value (maximum absolute amount: 1 billion).');
-        }
-        $scaled = round((float) $value * 100, 6);
-        return (int) ($truncate ? ($scaled < 0 ? ceil($scaled) : floor($scaled)) : round($scaled, 0, PHP_ROUND_HALF_UP));
+        return self::minorUnits($value, $truncate);
     }
 
     /**
-     * Reparte un monto entero entre pesos no negativos conservando cada centavo.
+     * Reparte un monto entero entre pesos no negativos conservando cada unidad menor.
      *
      * Calcula el cociente entero y resto exactos de monto por peso entre suma
      * de pesos, evitando multiplicar directamente los dos primeros factores.
-     * Asigna inicialmente los cocientes; entrega los centavos restantes a los
+     * Asigna inicialmente los cocientes; entrega las unidades menores restantes a los
      * mayores restos y desempata comparando las claves como strings en orden
      * lexicográfico. Conserva claves y orden del array de pesos en el resultado.
      * Así la suma de asignaciones coincide exactamente con amount.
@@ -52,9 +112,9 @@ final class Money
      * de pesos positiva. Los pesos cero no reciben parte del monto.
      * La suma de pesos debe ser int y no superar PHP_INT_MAX dividido entre cuatro.
      *
-     * @param int $amount Monto no negativo, ya expresado en centavos.
+     * @param int $amount Monto no negativo, ya expresado en unidades menores.
      * @param array<array-key, int> $weights Bases o pesos enteros no negativos por destinatario.
-     * @return array<array-key, int> Asignación en centavos para cada clave.
+     * @return array<array-key, int> Asignación en unidades menores para cada clave.
      * @throws \InvalidArgumentException Si monto, pesos o su suma no cumplen los límites enteros.
      * @throws \DomainException Si el monto es positivo y no existe peso total positivo.
      */

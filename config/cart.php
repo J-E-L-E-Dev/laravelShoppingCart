@@ -77,8 +77,10 @@ return [
     | Default number format
     |--------------------------------------------------------------------------
     |
-    | This defaults will be used for the formated numbers if you don't
-    | set them in the method call.
+    | decimals controls monetary/fiscal quantization AND presentation (default 2).
+    | It must be an integer from 0 to 4. Money centralizes the scale 10^decimals.
+    | Separators affect presentation only. Session metadata and v3 snapshots
+    | store precision; legacy/v2 amounts use their historical two-decimal scale.
     |
     */
 
@@ -97,16 +99,12 @@ return [
     | Driver
     |--------------------------------------------------------------------------
     |
-    | Controller for price calculations in products.
-    | Supported drivers:
-    |   GENERAL :
-    |       55.866 = 55.87 | 55.865 = 55.87 | 55.864 = 55.86
-    |    
-    |   HKA :
-    |       55.866 = 55.87 | 55.865 = 55.87 | 55.864 = 55.86
-    |   
-    |   PNP :
-    |       55.866 = 55.86 | 55.865 = 55.86 | 55.864 = 55.86
+    | GENERAL: HALF_UP base, HALF_UP VAT per complete line, then sum per aliquot.
+    | HKA: HALF_UP bases, group per aliquot, HALF_UP grouped VAT. Original item
+    | taxes are reconciled to that grouped authority without persisting overrides.
+    | PNP: truncate VAT per complete raw line, then sum; never tax grouped bases.
+    | PNP subtotal bases remain truncated, but VAT uses raw qty * unit price.
+    | All policies use format.decimals. Adjustments operate in integer minor units.
     */
 
     'driver' => 'HKA',

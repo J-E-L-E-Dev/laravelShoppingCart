@@ -7,11 +7,9 @@ API, calculation order, rounding rules and compatibility changes. Use `summary()
 for adjusted invoice bases; `content()` retains original product attributes.
 
 ### Compatibility:
-[![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
-[![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
-[![Laravel 9.x](https://img.shields.io/badge/Laravel-9.x-red.svg)](https://laravel.com/docs/9.x)
 [![Laravel 10.x](https://img.shields.io/badge/Laravel-10.x-red.svg)](https://laravel.com/docs/10.x)
 [![Laravel 11.x](https://img.shields.io/badge/Laravel-11.x-red.svg)](https://laravel.com/docs/11.x)
+[![Laravel 12.x](https://img.shields.io/badge/Laravel-12.x-red.svg)](https://laravel.com/docs/12.x)
 
 [![Latest Stable Version](http://poser.pugx.org/edwinylil1/laravelshoppingcart/v)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
 [![Total Downloads](http://poser.pugx.org/edwinylil1/laravelshoppingcart/downloads)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
@@ -38,27 +36,6 @@ or execute
 ```bash
     composer require edwinylil1/laravelshoppingcart
 ```
-
-### Laravel <= 7.0
-If you still have Laravel version 7.0, you need to add the package's service provider and assign it an alias. To do this, open your config/app.php file
-
-```bash
-nano config/app.php
-```
-
-### Add a new line to the providers array:
-
-```bash
-JeleDev\Shoppingcart\ShoppingcartServiceProvider::class
-```
-
-And add a new line to the `aliases` array:
-
-```bash
-'Cart' => JeleDev\Shoppingcart\Facades\Cart::class,
-```
-
-Now you're ready to start using the shopping cart in your application.
 
 ## User guide
 
@@ -110,52 +87,61 @@ You can modify the name and value properties to your needs.
 
 For Venezuela, the package supports invoice calculation for the fiscal providers 'The Factory HKA' and 'PNP Developments'
 
-There are three drivers; HKA is the default. `config('cart.driver')` controls both
-how bases and VAT are quantized and when bases are accumulated before calculating VAT.
+There are three drivers; HKA is the default. `cart.format.decimals` controls both
+presentation and monetary/fiscal precision: an integer from **0 to 4**, default **2**.
+All examples below use two decimals and 16% VAT.
 
-| Driver | Base per product line | VAT calculation |
+| Driver | Product base | VAT calculation |
 | --- | --- | --- |
-| GENERAL | HALF_UP to 2 decimal places | Round VAT for each final fiscal line, then sum by tax category |
-| HKA | HALF_UP to 2 decimal places | Sum final bases by tax category, then round VAT |
-| PNP | Truncate toward zero to 2 decimal places | Sum truncated bases by tax category, then truncate VAT |
+| GENERAL | HALF_UP at configured precision | HALF_UP VAT for each final fiscal line, then sum by tax category |
+| HKA | HALF_UP at configured precision | Sum bases by tax category, then HALF_UP VAT; reconcile original item taxes |
+| PNP | Truncated for subtotal; retain raw quantity × price for VAT | Truncate VAT for each fiscal line, then sum; never tax the grouped base |
 
-First quantize `quantity × price`, then add allocated PRORATED costs and subtract
-applicable line and document discounts to obtain each final product base.
-Allocations and discounts operate in cents. Each ITEM cost is another fiscal line:
-GENERAL taxes it independently; HKA and PNP include it in its tax category's
-accumulated base. ITEM amounts are already rounded to cents when registered.
-PRORATED is already included in product bases and is not added again. Tips and
-legacy costs increase the total without entering taxable bases or VAT.
+GENERAL: quantity 2 × price 10.23 gives base 20.46 and line VAT 3.2736 → **3.27**,
+not rounded unit VAT 1.64 × 2 = 3.28. Two distinct lines of 0.03 produce VAT
+0.00 + 0.00 under GENERAL, while HKA calculates `(0.03 + 0.03) × 16% → 0.01`.
+`summary()['bases']` remains grouped for all drivers: identical bases can correctly
+produce different `summary()['taxes']`. Tax names come from `cart.taxes`.
 
-**GENERAL versus HKA, two separate lines of 0.03 at 16% VAT:**
+PNP: two lines of 0.04 each produce `truncate(0.04 × 16%) = 0.00`, so total VAT
+is **0.00**, not grouped VAT 0.01. PNP does not truncate the input before computing
+line VAT: quantity 3 × price 0.023 gives raw base 0.069 and VAT **0.01**, while
+its displayed subtotal base is 0.06.
 
-```text
-GENERAL: 0.03 × 16% = 0.0048 → 0.00 for each line; VAT = 0.00
-HKA:     (0.03 + 0.03) × 16% = 0.0096 → 0.01
+**`CartItem::tax` now means VAT for the entire original line.** This applies to
+`toArray()`, `toJson()` and `json_encode(Cart::content())`. `taxTotal` formats that
+same amount; `total` is the quantized line base plus line VAT. `price` stays unit
+price; `unitTax` and `priceTax = price + unitTax` are separate unit concepts.
+Do not multiply `item.tax` by quantity again.
 
-GENERAL base = 0.06; VAT = 0.00
-HKA base     = 0.06; VAT = 0.01
-```
+HKA reconciles the provisional item taxes with grouped fiscal VAT, separately for
+each tax category. Example: A, quantity 3 × 0.34, has base 1.02 and provisional
+VAT 0.16; B, quantity 1 × 0.89, has provisional VAT 0.14. Grouped VAT is
+`1.91 × 16% → 0.31`, so **A.tax = 0.17 and B.tax = 0.14**.
+The entire signed difference goes to the line with the largest provisional tax,
+then largest quantized base, then lexicographically smallest rowId. This is
+recalculated from original products, independently of document adjustments.
 
-`summary()['bases']` always contains final bases grouped by tax category for
-invoicing and queries. This does not mean GENERAL uses grouped bases to calculate
-VAT. **Identical bases with different `summary()['taxes']` are correct and expected.**
-Tax entries use names from `config('cart.taxes')`; `IVA` is the percentage and
-`value` is the tax amount.
+`content()`, `get()`, `getById()` and `getByRowId()` keep the original objects and
+supply derived fiscal context without persisting tax overrides. A standalone or
+detached CartItem has only its provisional HKA tax; fetch it through Cart to get
+reconciliation against the current collection.
 
-**GENERAL uses the whole line, including quantity:** for quantity 2, price 10.23
-and VAT 16%, the base is `2 × 10.23 = 20.46`; VAT is `3.2736 → 3.27`.
-Rounding unit VAT first would give `1.64 × 2 = 3.28`, which is not this strategy.
+In `summary()`, PRORATED and discounts already belong to final product bases.
+PNP applies those allocated adjustments to the raw product base before truncating
+line VAT. Each ITEM cost is a separate fiscal line: GENERAL rounds its VAT, PNP
+truncates its VAT, and HKA includes its base in grouped VAT. Costs are registered
+with HALF_UP at configured precision. Tips and legacy costs do not generate VAT.
 
-**HKA versus PNP, two separate lines of 0.039 at 16% VAT:**
+Money uses integer minor units: 100 per currency unit at precision 2, 1000 at
+precision 3. Historical `cents` fields and `Money::cents()` retain their names but
+use the configured scale. `allocations` uses that same scale. Snapshots v3 and
+session metadata record precision; legacy/v2 monetary integers are interpreted
+at precision 2 and converted, so historical `cents = 123` remains **1.23**, not 0.123.
+Reducing precision rounds each stored operation HALF_UP.
 
-```text
-HKA: 0.039 → 0.04 each; base = 0.08; VAT = 0.0128 → 0.01
-PNP: 0.039 → 0.03 each; base = 0.06; VAT = 0.0096 → 0.00
-```
-
-See the [adjustments guide (Spanish)](docs/adjustments.es.md#orden-matemático)
-for the complete calculation order. To change the driver, publish the configuration file.
+See the [adjustments and migration guide](docs/adjustments.md) for formulas,
+precision conversion and HKA reconciliation limits. To change configuration, publish it:
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
@@ -364,7 +350,7 @@ Here's an example of a response with the HKA driver:
     }
 ```
 
-Tax amounts are numeric; `cart.format` does not change them.
+Tax amounts are numeric; `cart.format.decimals` controls their precision. Separators only affect presentation.
 
 **If you're not using the Facade, but use dependency injection in your (for instance) Controller, you can also simply get the tax property `$cart->tax`**
 

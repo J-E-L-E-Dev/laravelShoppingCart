@@ -83,9 +83,9 @@ Su tratamiento depende del driver:
 | ------- | ------------------------------------------------------------------ |
 | GENERAL | Calcula el IVA del ITEM como una línea fiscal independiente        |
 | HKA     | Incorpora su base a la base acumulada de su alícuota               |
-| PNP     | Incorpora su base a la alícuota siguiendo la estrategia fiscal PNP |
+| PNP     | Trunca IVA de cada ITEM por separado y luego suma por alícuota |
 
-El importe registrado mediante `addCost()` ya se cuantiza a centavos con HALF_UP. En PNP no se vuelve a truncar el importe original del costo ITEM.
+El importe de `addCost()` ya se cuantiza a unidades menores configuradas con HALF_UP. PNP trunca el IVA del ITEM, no su importe registrado.
 
 ### Costo PRORATED
 
@@ -503,13 +503,16 @@ La liquidación se realiza conceptualmente en el siguiente orden:
 cantidad × precio
 ```
 
-2. La base se cuantiza según el driver:
+2. La base de subtotal se cuantiza a la precisión configurada según el driver:
 
 ```text
 GENERAL → HALF_UP
 HKA     → HALF_UP
 PNP     → truncamiento hacia cero
 ```
+
+PNP conserva `cantidad × precio` sin cuantizar para calcular IVA por fila, incluidos
+los ajustes asignados. No usa la base truncada de subtotal como entrada del impuesto.
 
 3. Los costos PRORATED se distribuyen proporcionalmente entre las bases originales positivas.
 
@@ -573,151 +576,137 @@ cantidad × precio
 
 ## Estrategias fiscales
 
-El driver configurado mediante:
+`cart.driver` selecciona la acumulación. `cart.format.decimals` selecciona la
+precisión monetaria/fiscal y de presentación (entero 0–4, predeterminado 2).
+En las fórmulas, `R(x)` es HALF_UP y `T(x)` truncamiento hacia cero a esa precisión.
+`r` es el porcentaje configurado dividido entre 100.
 
-```php
-config('cart.driver');
-```
+| Driver | IVA del producto original | Autoridad de la alícuota |
+| --- | --- | --- |
+| GENERAL | `R(R(qty × price) × r)` | Suma de IVA redondeados por fila |
+| PNP | `T((qty × price) × r)` | Suma de IVA truncados por fila |
+| HKA | Provisional `R(R(qty × price) × r)` | `R(sum(R(qty × price)) × r)` |
 
-no determina únicamente si un número se redondea o se trunca.
+GENERAL y PNP nunca recalculan IVA sobre bases agrupadas; sólo HKA lo hace.
+En `summary()`, GENERAL/HKA usan bases finales cuantizadas tras PRORATED, descuentos
+de línea y generales asignados. PNP usa `max(0, qty × price + PRORATED asignado
+− descuentos aplicados)` como entrada del impuesto y trunca IVA por línea fiscal.
+La base PNP expuesta en `subtotal` y `lines.base` sigue truncada por compatibilidad;
+el resto fraccionario original se conserva para calcular IVA.
+ITEM es una línea fiscal separada, ya cuantizada HALF_UP al registrarse. GENERAL
+redondea su IVA individual, PNP lo trunca y HKA agrupa su base. PRORATED no se
+contabiliza dos veces. Propina y legacy nunca forman bases ni generan IVA.
 
-También determina cuándo se acumulan las bases antes de calcular el IVA.
+Ejemplos con precisión 2 e IVA 16%:
 
-| Driver  | Base por línea                        | Cálculo del IVA                                                                       |
-| ------- | ------------------------------------- | ------------------------------------------------------------------------------------- |
-| GENERAL | HALF_UP a 2 decimales                 | Calcula y redondea IVA por línea fiscal final; después suma                           |
-| HKA     | HALF_UP a 2 decimales                 | Agrupa bases finales por alícuota y calcula el IVA sobre la base acumulada            |
-| PNP     | Truncamiento hacia cero a 2 decimales | Agrupa bases truncadas por alícuota y trunca el IVA calculado sobre la base acumulada |
+* GENERAL, cantidad 2 × precio 10.23: base 20.46, IVA 3.2736 → **3.27**, no 3.28.
+* GENERAL, dos líneas distintas de .03: IVA .00 + .00 = **.00**. HKA: base agrupada
+  .06 produce IVA **.01**. Bases iguales con impuestos diferentes es correcto.
+* PNP, dos líneas de .04: IVA .0064 → .00 en cada una; total **.00**, no .01 agrupado.
+* PNP, cantidad 3 × precio .023: base sin cuantizar .069, IVA .01104 → **.01**;
+  truncar primero la entrada a .06 produciría incorrectamente .00.
 
-### GENERAL
+Con precisión 3, tres líneas distintas de .005 producen IVA total **.003 GENERAL**,
+**.002 HKA** y **.000 PNP**.
 
-GENERAL utiliza como unidad fiscal la línea completa.
+### IVA original del item y reconciliación HKA
 
-Para un producto:
+`CartItem::tax` y el campo serializado `tax` representan la fila original completa.
+`taxTotal` formatea ese mismo IVA sin multiplicarlo por cantidad. `total` es base
+original cuantizada más IVA de fila. `price` sigue siendo unitario; `unitTax` es
+IVA unitario y `priceTax` se deriva como `price + unitTax`. Una asignación manual al
+campo histórico `priceTax` no sobrescribe el cálculo fiscal. Los separadores afectan
+los métodos formateados, no la aritmética.
 
-```text
-cantidad × precio
-```
+Cart resuelve impuestos de la colección original e inyecta un resolutor temporal,
+guardado fuera del estado serializable del item mediante WeakMap. El resolutor
+sólo mantiene una referencia débil a la colección; CartItem no consulta Cart global,
+Session ni fachadas. Se conservan la colección original y las referencias a objetos.
+`content()`, `get()`, `getById()`, `getByRowId()`, `add()` y `update()` ofrecen la
+misma semántica; `toArray()`, `toJson()` y JSON de colecciones coinciden.
+El mapa se deriva en cada consulta, evitando persistir un impuesto obsoleto tras
+cambios de cantidad, driver o configuración fiscal. Un item independiente o separado
+de la colección sólo tiene IVA HKA provisional; consultarlo mediante Cart para
+reconciliarlo. La serialización nativa de PHP excluye el resolutor y conserva atributos.
 
-produce la base inicial de la línea.
+HKA ejecuta por separado para cada alícuota:
 
-Después de prorrateos y descuentos se obtiene su base fiscal final.
+1. Calcula IVA fiscal agrupado en unidades menores enteras.
+2. Calcula IVA provisional HALF_UP de cada fila en unidades menores.
+3. Resta la suma provisional al IVA agrupado.
+4. Asigna toda la diferencia con su signo a la fila de mayor IVA provisional;
+   desempata por mayor base cuantizada y luego menor rowId lexicográfico.
 
-El IVA se calcula independientemente para cada línea:
+No traslada residuos entre alícuotas. Diferencia cero no hace nada. GENERAL y PNP
+no necesitan reconciliación. El resultado HKA es determinista, independiente del
+orden de inserción y suma exactamente el IVA fiscal agrupado.
 
-```text
-IVA línea = base final línea × porcentaje
-```
-
-y se redondea HALF_UP a dos decimales.
-
-Finalmente se suman los IVA de las líneas correspondientes a cada alícuota.
-
-GENERAL no calcula el IVA unitario para posteriormente multiplicarlo por la cantidad.
-
-Tampoco calcula un único IVA sobre la suma de todas las bases de la alícuota.
-
-### HKA
-
-HKA cuantiza cada base de línea mediante HALF_UP a dos decimales.
-
-Después de obtener las bases fiscales finales:
-
-```text
-línea A
-línea B
-línea C
-   │
-   ▼
-agrupar por alícuota
-   │
-   ▼
-base acumulada
-   │
-   ▼
-calcular IVA
-   │
-   ▼
-HALF_UP a 2 decimales
-```
-
-Los costos ITEM se incorporan a la base acumulada de su alícuota.
-
-### PNP
-
-PNP utiliza truncamiento hacia cero para la cuantización de las bases de productos.
-
-Después:
+Ejemplo requerido con precisión 2:
 
 ```text
-bases truncadas
-      │
-      ▼
-agrupar por alícuota
-      │
-      ▼
-base acumulada
-      │
-      ▼
-calcular IVA
-      │
-      ▼
-truncar a 2 decimales
+A: qty 3 × .34 = 1.02; IVA provisional .16
+B: qty 1 × .89 =  .89; IVA provisional .14
+IVA agrupado: 1.91 × 16% = .3056 → .31
+Diferencia: .31 − (.16 + .14) = +.01
+A.tax = .17; B.tax = .14; suma = .31
 ```
 
-Los costos ITEM registrados ya llegan cuantizados a centavos por `addCost()` y participan en la base de su alícuota.
+La regla de receptor único también aplica residuos negativos y de varias unidades.
+Puede producir IVA individual informativo negativo: diez filas de .04 al 16%
+tienen provisional .01 cada una, IVA agrupado .06 y diferencia −.04; la seleccionada
+queda en −.03. No se limita ni redistribuye ese importe, pues cambiaría la regla
+especificada. El total fiscal agrupado sigue siendo .06.
 
----
+Los impuestos originales se reconcilian contra `totalTaxes(content, [])`, **no**
+contra `summary()['taxes']` cuando los ajustes cambian las bases finales. Ningún
+ajuste cambia retroactivamente el IVA original del producto. `summary()['bases']`
+siempre muestra bases agrupadas, independientemente de la estrategia de IVA.
 
 ## Precisión monetaria
 
-Los cálculos de ajustes utilizan centavos enteros siempre que es posible.
+`Money::decimals()` valida `cart.format.decimals`: sólo enteros entre 0 y 4.
+Rechaza negativos, floats, strings, booleanos y null. Si falta la configuración,
+usa 2. El límite mantiene la escala en 10000 como máximo y permite el límite
+existente de 1.000.000.000 por importe con margen en enteros de 64 bits, sin
+prometer precisión decimal arbitraria. Se rechazan desbordamientos defensivamente.
 
-La clase interna `Money` centraliza:
+`Money` centraliza:
 
-* conversión a centavos;
-* HALF_UP;
-* truncamiento;
-* distribución proporcional;
-* tratamiento del residuo.
+* `scale($decimals = null)`: única definición de `10 ** decimals`;
+* `minorUnits($value, $truncate = false, $decimals = null)`;
+* `fromMinorUnits($units, $decimals = null)`;
+* `rescale($units, $from, $to)`: conversión de escala sólo con enteros;
+* `allocate($amount, $weights)`: reparto entero por mayor resto, desempate
+  lexicográfico por rowId y conservación exacta del total distribuido.
 
-Esto evita utilizar valores formateados como parte de operaciones matemáticas.
+`Money::cents()` sigue como alias de `minorUnits()`. Los campos históricos `cents`
+y `allocations` conservan sus nombres, pero representan unidades menores de la
+precisión configurada: una unidad vale .01 con precisión 2 y .001 con precisión 3.
+Los importes devueltos siguen siendo números monetarios. Comparar unidades menores
+para aserciones exactas.
 
-`number_format()` y la configuración:
+Costos ITEM/PRORATED/propina/legacy, descuentos fijos, resultados de porcentajes,
+repartos, IVA, subtotal, totales y montos/textos de observaciones automáticas usan
+la precisión configurada. Los descuentos fijos conservan `value` solicitado y
+agregan `fixedUnits` con su monto cuantizado; `amount`/`cents` siguen mostrando el
+descuento efectivo limitado al saldo. Los porcentajes no cambian de escala.
 
-```php
-config('cart.format');
-```
+Las entradas numéricas siguen admitiendo floats. Al cuantizar se normaliza ruido
+binario del valor escalado antes de HALF_UP o truncamiento; no es un motor decimal
+de precisión arbitraria. Reparto, aplicación del residuo HKA y conversión de escalas
+usan enteros. `number_format()` sólo presenta valores; `decimal_point` y
+`thousand_separator` no afectan la aritmética, pero `decimals` ahora sí.
 
-se utilizan para presentación y no determinan la precisión contable.
+### Carritos activos y cambio de precisión
 
-### Distribución exacta
-
-Los costos PRORATED y descuentos generales pueden requerir distribuir una cantidad de centavos entre varias líneas.
-
-El paquete utiliza distribución proporcional y asigna los centavos residuales determinísticamente.
-
-La suma de todas las asignaciones siempre debe cumplir:
-
-```text
-suma de allocations
-=
-importe total cuantizado
-```
-
-Cuando existen restos equivalentes, se utiliza `rowId` como criterio determinista de desempate.
-
-El resultado no depende del orden en que los productos fueron incorporados al carrito.
-
-### Floats
-
-Por compatibilidad, la API continúa aceptando valores numéricos y `float`.
-
-Internamente `Money::cents()` reduce el ruido binario antes de cuantizar los valores.
-
-Los `float` devueltos por una API PHP pueden volver a mostrar representación binaria al realizar operaciones externas.
-
-Para verificaciones monetarias exactas se recomienda comparar centavos en lugar de igualdad directa entre sumas de `float`.
+Los metadatos de sesión guardan `decimals`. Si falta, se asume la precisión
+histórica 2. Las consultas derivan importes a la precisión actual sin reescribir
+metadatos; la siguiente operación de metadatos guarda las conversiones con la
+precisión actual. Aumentar precisión conserva el valor: 123 unidades históricas
+a precisión 2 pasan a 1230 con precisión 3, siempre **1.23**. Reducir precisión
+redondea HALF_UP por operación. Una vez guardada una operación con menor precisión,
+las fracciones descartadas no se recuperan al aumentarla después. Los precios
+unitarios permanecen originales; sus bases e impuestos se recalculan.
 
 ---
 
@@ -739,6 +728,7 @@ Los metadatos incluyen:
 
 ```php
 [
+    'decimals' => 2,
     'costs' => [],
     'discounts' => [],
     'observations' => [],
@@ -755,13 +745,19 @@ Conceptualmente:
 
 ```php
 [
-    'version' => 2,
+    'version' => 3,
+    'decimals' => 2, // precisión usada para codificar los metadatos
     'content' => ...,
     'metadata' => ...,
 ]
 ```
 
-La versión actual puede leer los registros históricos que contenían solamente la colección de productos.
+La versión actual lee colecciones legacy, snapshots v2 y snapshots v3.
+Tanto `restore()` como `merge()` interpretan los enteros monetarios v2 con precisión
+histórica 2 y los convierten a la actual. V3 exige `decimals` explícito; rechaza
+versiones desconocidas. Un `cents = 123` histórico pasa a 1230 unidades con precisión
+3 y sigue significando 1.23. También se convierten las unidades de descuentos fijos;
+se conservan valores solicitados y porcentajes. No requiere migración de base de datos.
 
 ### `restore()`
 
@@ -873,7 +869,7 @@ Para generar una factura con ajustes debe utilizarse `summary()`.
 
 Los snapshots actuales incluyen productos y metadatos.
 
-La versión actual puede restaurar snapshots antiguos que contenían únicamente productos.
+Colecciones legacy y snapshots v2 siguen siendo legibles; v3 registra precisión explícita.
 
 Las versiones antiguas del paquete no conocen la estructura versionada actual.
 

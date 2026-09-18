@@ -83,9 +83,9 @@ Its tax treatment depends on the configured driver:
 | ------- | -------------------------------------------------------------- |
 | GENERAL | Calculates tax for the ITEM as an independent fiscal line      |
 | HKA     | Adds its base to the accumulated base of its aliquot           |
-| PNP     | Adds its base to the aliquot following the PNP fiscal strategy |
+| PNP     | Truncates VAT for each ITEM separately, then sums by aliquot |
 
-The amount registered through `addCost()` is already quantized to cents using HALF_UP. Under PNP, the original ITEM amount is not truncated again.
+The amount registered through `addCost()` is already quantized to configured minor units using HALF_UP. PNP truncates the ITEM's VAT, not its registered amount.
 
 ### PRORATED Cost
 
@@ -503,13 +503,16 @@ The settlement is conceptually performed in the following order:
 quantity × price
 ```
 
-2. The base is quantized according to the fiscal driver:
+2. The subtotal base is quantized at configured precision according to the driver:
 
 ```text
 GENERAL → HALF_UP
 HKA     → HALF_UP
 PNP     → truncate toward zero
 ```
+
+PNP retains raw `quantity × price` separately for per-line VAT, including any
+allocated adjustments. It does not use the truncated subtotal base as the tax input.
 
 3. PRORATED costs are distributed proportionally among the positive original bases.
 
@@ -573,151 +576,135 @@ quantity × price
 
 ## Fiscal Strategies
 
-The driver configured through:
+`cart.driver` selects the accumulation rule. `cart.format.decimals` selects
+monetary/fiscal and display precision (integer 0–4, default 2). In the formulas,
+`R(x)` means HALF_UP at that precision and `T(x)` means truncation toward zero.
+`r` is the configured tax percentage divided by 100.
 
-```php
-config('cart.driver');
-```
+| Driver | Original product tax | Tax category authority |
+| --- | --- | --- |
+| GENERAL | `R(R(qty × price) × r)` | Sum rounded line taxes |
+| PNP | `T((qty × price) × r)` | Sum truncated line taxes |
+| HKA | Provisional `R(R(qty × price) × r)` | `R(sum(R(qty × price)) × r)` |
 
-does not only determine whether a value is rounded or truncated.
+GENERAL and PNP never recompute tax on grouped bases. HKA alone does so.
+In `summary()`, GENERAL/HKA use final quantized bases after PRORATED, line discounts
+and allocated document discounts. PNP uses `max(0, qty × price + allocated PRORATED
+− applied discounts)` as the tax input, then truncates tax per fiscal line.
+The PNP base exposed in `subtotal` and `lines.base` remains truncated for backward
+compatibility; its raw fractional remainder is retained for the tax calculation.
+ITEM costs are separate fiscal lines, already quantized HALF_UP at registration.
+GENERAL rounds their individual VAT, PNP truncates it, and HKA groups their bases.
+PRORATED is not counted twice. Tips and legacy costs never enter bases or VAT.
 
-It also determines when bases are accumulated before tax is calculated.
+Examples at precision 2 and VAT 16%:
 
-| Driver  | Base per line                      | Tax calculation                                                                            |
-| ------- | ---------------------------------- | ------------------------------------------------------------------------------------------ |
-| GENERAL | HALF_UP to 2 decimals              | Calculates and rounds tax for each final fiscal line, then sums                            |
-| HKA     | HALF_UP to 2 decimals              | Groups final bases by aliquot and calculates tax on the accumulated base                   |
-| PNP     | Truncate toward zero to 2 decimals | Groups truncated bases by aliquot and truncates the tax calculated on the accumulated base |
+* GENERAL, quantity 2 × price 10.23: base 20.46, line tax 3.2736 → **3.27**, not 3.28.
+* GENERAL, two distinct lines of .03: tax .00 + .00 = **.00**. HKA: grouped base
+  .06 gives tax **.01**. Identical `summary()['bases']` with different taxes is correct.
+* PNP, two lines of .04: each tax .0064 → .00; total **.00**, not grouped .01.
+* PNP, quantity 3 × price .023: raw base .069 gives tax .01104 → **.01**;
+  truncating the input base to .06 first would incorrectly produce .00.
 
-### GENERAL
+At precision 3, three distinct lines of .005 give total VAT **.003 GENERAL**,
+**.002 HKA**, and **.000 PNP**.
 
-GENERAL uses the entire line as the fiscal unit.
+### Original item tax and HKA reconciliation
 
-For a product:
+`CartItem::tax` and the serialized `tax` field represent the whole original line.
+`taxTotal` formats the same amount without multiplying by quantity. `total` is
+quantized original base plus line tax. `price` remains unit price; `unitTax` is
+unit VAT and `priceTax` is derived as `price + unitTax`. A manually assigned historical
+`priceTax` is not a fiscal override. Separators affect formatted methods, not arithmetic.
 
-```text
-quantity × price
-```
+Cart resolves taxes for the original collection and supplies each item a temporary
+resolver, stored outside its serializable state in a WeakMap. The resolver holds
+only a weak reference to the collection; CartItem does not query global Cart,
+Session or a facade. The original collection and object identities are preserved.
+`content()`, `get()`, `getById()`, `getByRowId()`, `add()` and `update()` expose the
+same semantics; `toArray()`, `toJson()` and JSON collection responses agree.
+The mapping is derived again on access, so quantity, driver or tax configuration
+changes cannot leave a persisted tax override. A detached or standalone item has
+only its provisional HKA tax; retrieve it through Cart for grouped reconciliation.
+Native PHP serialization excludes the resolver and retains commercial attributes.
 
-produces the initial line base.
+For HKA, independently in each tax category:
 
-After prorated costs and discounts, the final fiscal base is obtained.
+1. Compute grouped fiscal VAT in integer minor units.
+2. Compute each line's provisional HALF_UP VAT in minor units.
+3. Subtract the sum of provisionals from grouped VAT.
+4. Assign the entire signed difference to the largest provisional tax; ties use
+   the largest quantized base, then the lexicographically smallest rowId.
 
-Tax is calculated independently for each line:
+No residual is moved to another tax category. Zero difference does nothing.
+GENERAL and PNP need no reconciliation. HKA's result is deterministic and independent
+of insertion order, and its sum exactly matches the grouped authority.
 
-```text
-line tax = final line base × tax rate
-```
-
-and rounded HALF_UP to two decimal places.
-
-The tax amounts of the lines belonging to each aliquot are then summed.
-
-GENERAL does not calculate unit tax and then multiply the rounded result by quantity.
-
-It also does not calculate a single tax amount over the sum of all bases in the aliquot.
-
-### HKA
-
-HKA quantizes each line base using HALF_UP to two decimal places.
-
-After obtaining the final fiscal bases:
-
-```text
-line A
-line B
-line C
-   │
-   ▼
-group by aliquot
-   │
-   ▼
-accumulated base
-   │
-   ▼
-calculate tax
-   │
-   ▼
-HALF_UP to 2 decimals
-```
-
-ITEM costs are included in the accumulated base of their corresponding aliquot.
-
-### PNP
-
-PNP uses truncation toward zero when quantizing product bases.
-
-Then:
+Required example at precision 2:
 
 ```text
-truncated bases
-       │
-       ▼
-group by aliquot
-       │
-       ▼
-accumulated base
-       │
-       ▼
-calculate tax
-       │
-       ▼
-truncate to 2 decimals
+A: qty 3 × .34 = 1.02; provisional VAT .16
+B: qty 1 × .89 =  .89; provisional VAT .14
+Grouped VAT: 1.91 × 16% = .3056 → .31
+Difference: .31 − (.16 + .14) = +.01
+A.tax = .17; B.tax = .14; sum = .31
 ```
 
-Registered ITEM costs are already quantized to cents by `addCost()` and participate in the base of their corresponding aliquot.
+The specified single-recipient rule also handles negative and multi-unit differences.
+It can produce a negative informational item tax: ten lines of .04 at 16% have
+provisional tax .01 each, grouped VAT .06 and difference −.04; the selected item
+becomes −.03. No clamping or redistribution is applied, because that would change
+the specified rule. The grouped fiscal total remains .06.
 
----
+Original taxes reconcile against `totalTaxes(content, [])`, **not** against
+`summary()['taxes']` when costs or discounts change final bases. Adjustments never
+retroactively alter original item taxes. `summary()['bases']` is always grouped
+for reporting, independently of the driver's tax accumulation rule.
 
 ## Monetary Precision
 
-Adjustment calculations use integer cents whenever possible.
+`Money::decimals()` validates `cart.format.decimals`. Only integers 0–4 are allowed;
+negative values, floats, strings, booleans and null are rejected. A missing setting
+defaults to 2. The upper bound keeps scale at most 10000, supports the existing
+1-billion single-amount limit with ample 64-bit integer margin, and avoids pretending
+to provide arbitrary decimal precision. Integer overflow is rejected defensively.
 
-The internal `Money` class centralizes:
+`Money` centralizes:
 
-* conversion to cents;
-* HALF_UP rounding;
-* truncation;
-* proportional distribution;
-* remainder handling.
+* `scale($decimals = null)`: the single definition of `10 ** decimals`;
+* `minorUnits($value, $truncate = false, $decimals = null)`;
+* `fromMinorUnits($units, $decimals = null)`;
+* `rescale($units, $from, $to)`: integer-only scale conversion;
+* `allocate($amount, $weights)`: integer largest-remainder allocation, with lexical
+  rowId tie-breaking and exact preservation of the allocated total.
 
-This prevents formatted values from being used in mathematical operations.
+`Money::cents()` remains an alias of `minorUnits()`. Historical `cents` and
+`allocations` fields retain their names but represent configured minor units:
+1 unit means .01 at precision 2 and .001 at precision 3. Returned amounts remain
+numeric currency amounts. Compare minor units for exact assertions.
 
-`number_format()` and:
+Costs (ITEM, PRORATED, tip and legacy), fixed discounts, percentage discount results,
+allocations, VAT, subtotal, totals and automatic observation amounts/text all use
+the configured precision. Fixed discounts preserve the requested `value` and carry
+`fixedUnits` for their quantized amount; `amount`/`cents` still report the effective
+capped discount. Percentage discounts keep their percentage unchanged.
 
-```php
-config('cart.format');
-```
+Input numeric values may still be floats. Quantization normalizes binary noise in
+the scaled value before HALF_UP or truncation; this is not an arbitrary-precision
+decimal engine. Distribution, HKA residue application and scale conversion use integers.
+`number_format()` only presents values; `decimal_point` and `thousand_separator`
+do not affect arithmetic, while `decimals` now does.
 
-are used for presentation only and do not determine accounting precision.
+### Active carts and precision changes
 
-### Exact Distribution
-
-PRORATED costs and general discounts may require distributing a number of cents among several lines.
-
-The package uses proportional distribution and assigns residual cents deterministically.
-
-The sum of all allocations always satisfies:
-
-```text
-sum of allocations
-=
-total quantized amount
-```
-
-When equal remainders exist, `rowId` is used as a deterministic tie-breaker.
-
-The result does not depend on the order in which products were added to the cart.
-
-### Floats
-
-For backward compatibility, the API continues to accept numeric values and `float`.
-
-Internally, `Money::cents()` reduces binary floating-point noise before quantizing values.
-
-`float` values returned by a PHP API may expose their binary representation again when external calculations are performed.
-
-For exact monetary assertions, comparing cents is recommended instead of direct equality between sums of `float` values.
+Session metadata records `decimals`. Data without it has historical precision 2.
+Reads derive amounts at the current precision without rewriting session metadata;
+the next metadata mutation stores converted operations with the current precision.
+Raising precision preserves value exactly: historical 123 units at precision 2
+become 1230 at precision 3, still **1.23**. Lowering precision rounds HALF_UP per
+operation. Once a mutation saves that reduced precision, discarded fractions cannot
+be recovered by increasing precision later. Product unit prices remain original;
+their bases and taxes are recalculated at the current precision.
 
 ---
 
@@ -739,6 +726,7 @@ Metadata includes:
 
 ```php
 [
+    'decimals' => 2,
     'costs' => [],
     'discounts' => [],
     'observations' => [],
@@ -755,13 +743,19 @@ Conceptually:
 
 ```php
 [
-    'version' => 2,
+    'version' => 3,
+    'decimals' => 2, // precision used to encode metadata
     'content' => ...,
     'metadata' => ...,
 ]
 ```
 
-The current version can read historical records that contain only the product collection.
+The current version reads legacy product collections, v2 snapshots and v3 snapshots.
+Both `restore()` and `merge()` interpret v2 monetary integers at historical precision
+2 and rescale to the current precision. V3 requires explicit `decimals`; unknown
+versions are rejected. Historical `cents = 123` becomes 1230 units at precision 3
+and still means 1.23. Stored fixed discount units are converted as well; requested
+values and percentage rates remain unchanged. No database migration is required.
 
 ### `restore()`
 
@@ -873,7 +867,7 @@ Use `summary()` when generating an invoice that contains adjustments.
 
 Current snapshots contain products and metadata.
 
-The current version can restore older snapshots containing products only.
+Legacy product-only and v2 snapshots remain readable; v3 records precision explicitly.
 
 Older package versions do not understand the current versioned snapshot structure.
 

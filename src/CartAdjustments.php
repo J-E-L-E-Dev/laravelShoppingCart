@@ -30,16 +30,53 @@ trait CartAdjustments
     /**
      * Lee los registros documentales de la sesión, sin calcular importes efectivos.
      *
-     * Si la clave falta devuelve tres listas vacías. Los costos conservan importe
+     * Si la clave falta devuelve precisión y tres listas vacías. Los costos conservan importe
      * cuantizado y cents; los descuentos guardan la instrucción solicitada; solamente
      * las observaciones manuales se almacenan en observations. No valida la estructura
-     * de datos que ya estuvieran guardados.
+     * de datos que ya estuvieran guardados, salvo precisión y conversión monetaria.
      *
-     * @return array{costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string}>, observations: list<array{type: 'manual', text: string}>} Estado documental de la instancia.
+     * @return array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} Estado documental de la instancia.
      */
     protected function metadata()
     {
-        return $this->session->get($this->metadataKey(), ['costs' => [], 'discounts' => [], 'observations' => []]);
+        return $this->normalizeMetadata($this->session->get($this->metadataKey(), [
+            'decimals' => Money::decimals(), 'costs' => [], 'discounts' => [], 'observations' => [],
+        ]));
+    }
+
+    /**
+     * Interpreta cents con su escala almacenada; registros históricos sin escala son de 2 decimales.
+     * No modifica la sesión durante consultas. Al guardar una operación se materializa la
+     * precisión actual. Reducir precisión aplica HALF_UP; aumentar no inventa fracciones.
+     */
+    private function normalizeMetadata(array $metadata)
+    {
+        $from = Money::decimals($metadata['decimals'] ?? 2);
+        $to = Money::decimals();
+        foreach ($metadata['costs'] as &$cost) {
+            $cost['cents'] = Money::rescale($cost['cents'], $from, $to);
+            $cost['amount'] = Money::fromMinorUnits($cost['cents']);
+        }
+        unset($cost);
+        foreach ($metadata['discounts'] as &$discount) {
+            if ($discount['type'] === 'fixed') {
+                $units = $discount['fixedUnits'] ?? Money::minorUnits($discount['value'], false, $from);
+                $discount['fixedUnits'] = Money::rescale($units, $from, $to);
+            }
+        }
+        unset($discount);
+        $metadata['decimals'] = $to;
+        return $metadata;
+    }
+
+    /** Valida sobres v2/v3 y convierte los metadatos antes de restore/merge. */
+    private function snapshotMetadata(array $snapshot)
+    {
+        if (!in_array($snapshot['version'], [2, 3], true)) throw new \InvalidArgumentException('Unsupported cart snapshot version.');
+        if ($snapshot['version'] === 3 && !isset($snapshot['decimals'])) throw new \InvalidArgumentException('Snapshot precision is required.');
+        $metadata = $snapshot['metadata'];
+        $metadata['decimals'] = $snapshot['version'] === 2 ? 2 : Money::decimals($snapshot['decimals']);
+        return $this->normalizeMetadata($metadata);
     }
 
     /**
@@ -47,18 +84,19 @@ trait CartAdjustments
      *
      * No modifica la colección de productos ni genera eventos.
      *
-     * @param array{costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string}>, observations: list<array{type: 'manual', text: string}>} $metadata Listas de operaciones y observaciones manuales.
+     * @param array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} $metadata Listas de operaciones y observaciones manuales.
      * @return void
      */
     protected function saveMetadata(array $metadata)
     {
+        $metadata['decimals'] = Money::decimals();
         $this->session->put($this->metadataKey(), $metadata);
     }
 
     /**
      * Devuelve los registros de costos, conservando operaciones repetidas.
      *
-     * Cada array identifica nombre, importe cuantizado, centavos, modo, alícuota
+     * Cada array identifica nombre, importe cuantizado, unidades menores, modo, alícuota
      * y descripción. Incluye ITEM, PRORATED, tip y legacy, separados de content().
      *
      * @return Collection<int, array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}> Operaciones en orden de registro.
@@ -83,7 +121,7 @@ trait CartAdjustments
     }
 
     /**
-     * Suma los centavos registrados de todos los costos y devuelve un importe numérico.
+     * Suma las unidades menores registrados de todos los costos y devuelve un importe numérico.
      *
      * Incluye ITEM, PRORATED, propinas y legacy. Es una consulta informativa del
      * importe de entrada: no refleja cuánto de un prorrateo queda tras descuentos.
@@ -93,7 +131,7 @@ trait CartAdjustments
      */
     public function totalCost()
     {
-        return array_sum(array_column($this->metadata()['costs'], 'cents')) / 100;
+        return Money::fromMinorUnits(Money::sum(array_column($this->metadata()['costs'], 'cents')));
     }
 
     /**
@@ -121,7 +159,7 @@ trait CartAdjustments
      * Se aplica después de todos los descuentos de línea y en orden de registro
      * respecto a otros generales. Excluye costos ITEM, propina y legacy.
      * percentage calcula una fracción de la base restante; fixed es un importe
-     * para todo el documento. Se limita al saldo y reparte en centavos por base
+     * para todo el documento. Se limita al saldo y reparte en unidades menores por base
      * restante, antes de calcular IVA. Sin productos el importe efectivo es cero.
      * Registrar el descuento no ejecuta todavía la liquidación.
      *
@@ -178,9 +216,11 @@ trait CartAdjustments
         if (!in_array($type, ['percentage', 'fixed'], true) || !is_numeric($value) || !is_finite((float) $value) || $value < 0 || ($type === 'percentage' && $value > 100)) {
             throw new \InvalidArgumentException('Discount must be nonnegative: percentage (0–100) or fixed.');
         }
-        Money::cents($value);
+        $units = Money::minorUnits($value);
         $metadata = $this->metadata();
-        $metadata['discounts'][] = ['rowId' => $rowId, 'type' => $type, 'value' => (float) $value, 'concept' => (string) $concept];
+        $discount = ['rowId' => $rowId, 'type' => $type, 'value' => (float) $value, 'concept' => (string) $concept];
+        if ($type === 'fixed') $discount['fixedUnits'] = $units;
+        $metadata['discounts'][] = $discount;
         $this->saveMetadata($metadata);
         return $this;
     }
@@ -214,10 +254,10 @@ trait CartAdjustments
      *
      * Ordena primero los descuentos de línea y después los generales, respetando
      * el registro dentro de cada grupo. amount es monetario, cents su equivalente
-     * entero y allocations contiene los centavos descontados por rowId.
+     * entero y allocations contiene las unidades menores descontados por rowId.
      * Los montos se recalculan al consultar, incluso si las cantidades cambiaron.
      *
-     * @return Collection<int, array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, amount: int|float, cents: int, allocations: array<string, int>}> Operaciones efectivas.
+     * @return Collection<int, array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int, amount: int|float, cents: int, allocations: array<string, int>}> Operaciones efectivas.
      * @throws \DomainException Si hay bases negativas o un prorrateo positivo sin base distribuible.
      * @throws \InvalidArgumentException Si un importe o reparto excede los límites de Money.
      */
@@ -248,7 +288,7 @@ trait CartAdjustments
      * Primero devuelve las manuales; después una por operación tip, luego una por
      * descuento efectivo y, si hay descuentos, un consolidado discount_total.
      * Las automáticas se derivan en cada consulta, sin modificar sesión. Sus textos
-     * usan dos decimales y punto, independientemente de cart.format.
+     * usan la precisión configurada y punto, independientemente del separador decimal.
      * No son la fuente contable: importes y allocations provienen de costos y
      * descuentos estructurados. La consulta ejecuta la liquidación mediante discounts().
      *
@@ -273,17 +313,17 @@ trait CartAdjustments
         foreach ($this->costs() as $cost) {
             if ($cost['name'] === self::COST_TIP) $observations[] = [
                 'type' => 'tip', 'description' => $cost['description'], 'amount' => $cost['amount'],
-                'text' => 'Se agregó propina por ' . number_format($cost['amount'], 2, '.', ''),
+                'text' => 'Se agregó propina por ' . number_format($cost['amount'], Money::decimals(), '.', ''),
             ];
         }
         $discounts = $this->discounts();
         foreach ($discounts as $discount) $observations[] = array_merge($discount, [
             'discountType' => $discount['type'], 'type' => 'discount',
-            'text' => $discount['concept'] . ': ' . number_format($discount['amount'], 2, '.', ''),
+            'text' => $discount['concept'] . ': ' . number_format($discount['amount'], Money::decimals(), '.', ''),
         ]);
         if ($discounts->count()) $observations[] = [
-            'type' => 'discount_total', 'amount' => $discounts->sum('cents') / 100,
-            'text' => 'Se aplicaron descuentos por un total de ' . number_format($discounts->sum('cents') / 100, 2, '.', '') . '. Conceptos: ' . $discounts->pluck('concept')->implode('; ') . '.',
+            'type' => 'discount_total', 'amount' => Money::fromMinorUnits($discounts->sum('cents')),
+            'text' => 'Se aplicaron descuentos por un total de ' . number_format(Money::fromMinorUnits($discounts->sum('cents')), Money::decimals(), '.', '') . '. Conceptos: ' . $discounts->pluck('concept')->implode('; ') . '.',
         ];
         return new Collection($observations);
     }
@@ -304,19 +344,19 @@ trait CartAdjustments
      *    sin alícuota propia; cada parte hereda la del producto receptor.
      * 3. Aplica descuentos de línea y después generales, en orden de registro
      *    dentro de cada grupo, siempre sobre el saldo restante antes del IVA.
-     *    Los porcentajes redondean a centavos; un fijo se limita al saldo.
+     *    Los porcentajes redondean a unidades menores; un fijo se limita al saldo.
      *    Los generales afectan únicamente productos, no ITEM, propina ni legacy.
      * 4. Trata cada ITEM como línea fiscal adicional. GENERAL redondea el IVA
      *    de cada línea final y suma los importes por alícuota. HKA acumula bases
-     *    finales por alícuota y redondea su IVA; PNP acumula las bases obtenidas
-     *    desde filas truncadas y trunca el IVA final. Usa cart.taxes y
-     *    CartItem::calculateTaxes(); los ITEM ya llegan cuantizados en centavos.
+     *    finales por alícuota y redondea su IVA; PNP trunca IVA por fila sobre
+     *    qty × price sin cuantizar + prorrateos - descuentos (mínimo cero).
+     *    FiscalCalculator usa cart.taxes; ITEM ya llega en unidades menores.
      *    bases siempre muestra las sumas por alícuota para consulta, incluso
      *    cuando GENERAL calcula los impuestos por línea.
      * 5. Suma base final + IVA + propina + legacy. Costos prorrateados y descuentos
      *    ya distribuidos no se contabilizan por segunda vez.
      *
-     * Money::allocate() conserva centavos exactos con mayor resto y desempate
+     * Money::allocate() conserva unidades menores exactos con mayor resto y desempate
      * lexicográfico por rowId. Un prorrateo positivo exige base distribuible;
      * los descuentos con saldo cero tienen importe efectivo cero.
      *
@@ -330,12 +370,12 @@ trait CartAdjustments
      * - tax: suma monetaria de todos los importes de IVA.
      * - tip / legacyCost: recargos sin IVA, excluidos de subtotal.
      * - totalCost: suma de costos registrados, incluida propina, antes de descuentos.
-     * - discounts: operaciones efectivas y reparto por línea en centavos.
+     * - discounts: operaciones efectivas y reparto por línea en unidades menores.
      * - totalDiscount: suma monetaria efectivamente descontada.
      * - total: subtotal + tax + tip + legacyCost.
      *
      * Todos los importes monetarios retornados son números sin formato. Los campos
-     * cents y allocations permanecen en centavos enteros, no en unidades monetarias.
+     * cents y allocations permanecen en unidades menores enteros, no en unidades monetarias.
      * No sumar totalCost ni restar totalDiscount nuevamente al total.
      *
      * @return array{
@@ -356,7 +396,7 @@ trait CartAdjustments
      *     tip: int|float,
      *     legacyCost: int|float,
      *     totalCost: int|float,
-     *     discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, amount: int|float, cents: int, allocations: array<string, int>}>,
+     *     discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int, amount: int|float, cents: int, allocations: array<string, int>}>,
      *     totalDiscount: int|float,
      *     total: int|float
      * } Liquidación numérica completa.
@@ -366,9 +406,10 @@ trait CartAdjustments
     public function summary()
     {
         $metadata = $this->metadata();
-        $lines = $weights = [];
+        $lines = $weights = $rawBases = [];
         foreach ($this->getContent() as $rowId => $item) {
-            $base = Money::cents($item->qty * $item->price, config('cart.driver') === 'PNP');
+            $rawBases[$rowId] = $item->qty * $item->price;
+            $base = Money::minorUnits($rawBases[$rowId], config('cart.driver') === 'PNP');
             if ($base < 0) throw new \DomainException('Product bases must be nonnegative.');
             $weights[$rowId] = $base;
             $lines[$rowId] = ['rowId' => $rowId, 'id' => $item->id, 'aliquot' => $item->aliquot, 'original' => $base, 'prorated' => 0, 'discount' => 0, 'base' => $base];
@@ -393,13 +434,13 @@ trait CartAdjustments
             $eligible = [];
             foreach ($lines as $key => $line) if (!$linePhase || $discount['rowId'] === $key) $eligible[$key] = $line['base'];
             $base = array_sum($eligible);
-            $amount = min($base, $discount['type'] === 'fixed' ? Money::cents($discount['value']) : (int) round($base * $discount['value'] / 100, 0, PHP_ROUND_HALF_UP));
+            $amount = min($base, $discount['type'] === 'fixed' ? $discount['fixedUnits'] : (int) round($base * $discount['value'] / 100, 0, PHP_ROUND_HALF_UP));
             $allocation = Money::allocate($amount, $eligible);
             foreach ($allocation as $key => $part) {
                 $lines[$key]['discount'] += $part;
                 $lines[$key]['base'] -= $part;
             }
-            $applied[] = array_merge($discount, ['amount' => $amount / 100, 'cents' => $amount, 'allocations' => $allocation]);
+            $applied[] = array_merge($discount, ['amount' => Money::fromMinorUnits($amount), 'cents' => $amount, 'allocations' => $allocation]);
         }
         $bases = [];
         foreach (config('cart.taxes') as $aliquot => $tax) {
@@ -408,20 +449,25 @@ trait CartAdjustments
         foreach ($lines as $line) $bases[$line['aliquot']] += $line['base'];
         foreach ($costLines as $cost) $bases[$cost['aliquot']] += $cost['cents'];
         $fiscalLines = [];
-        foreach ($lines as $line) $fiscalLines[] = ['aliquot' => $line['aliquot'], 'base' => $line['base']];
-        foreach ($costLines as $cost) $fiscalLines[] = ['aliquot' => $cost['aliquot'], 'base' => $cost['cents']];
-        $taxes = $this->calculateFiscalTaxes($fiscalLines, [], config('cart.driver') === 'GENERAL');
+        foreach ($lines as $rowId => $line) $fiscalLines[$rowId] = [
+            'aliquot' => $line['aliquot'], 'base' => $line['base'],
+            'rawBase' => max(0, $rawBases[$rowId] + Money::fromMinorUnits($line['prorated'] - $line['discount'])),
+        ];
+        foreach ($costLines as $key => $cost) $fiscalLines['cost:' . $key] = [
+            'aliquot' => $cost['aliquot'], 'base' => $cost['cents'], 'rawBase' => Money::fromMinorUnits($cost['cents']),
+        ];
+        $taxes = FiscalCalculator::calculate($fiscalLines, FiscalCalculator::driver())['taxes'];
         $taxTotal = 0;
-        foreach ($taxes as $tax) $taxTotal += Money::cents($tax['value']);
+        foreach ($taxes as $tax) $taxTotal += Money::minorUnits($tax['value']);
         foreach ($bases as $aliquot => $base) {
-            $bases[$aliquot] = $base / 100;
+            $bases[$aliquot] = Money::fromMinorUnits($base);
         }
         $subtotal = array_sum(array_column($lines, 'base')) + array_sum(array_column($costLines, 'cents'));
-        foreach ($lines as &$line) foreach (['original', 'prorated', 'discount', 'base'] as $field) $line[$field] /= 100;
+        foreach ($lines as &$line) foreach (['original', 'prorated', 'discount', 'base'] as $field) $line[$field] = Money::fromMinorUnits($line[$field]);
         unset($line);
         return ['lines' => $lines, 'costLines' => $costLines, 'bases' => $bases, 'taxes' => $taxes,
-            'subtotal' => $subtotal / 100, 'tax' => $taxTotal / 100, 'tip' => $tip / 100, 'legacyCost' => $legacy / 100,
-            'totalCost' => $this->totalCost(), 'discounts' => $applied, 'totalDiscount' => array_sum(array_column($applied, 'cents')) / 100,
-            'total' => ($subtotal + $taxTotal + $tip + $legacy) / 100];
+            'subtotal' => Money::fromMinorUnits($subtotal), 'tax' => Money::fromMinorUnits($taxTotal), 'tip' => Money::fromMinorUnits($tip), 'legacyCost' => Money::fromMinorUnits($legacy),
+            'totalCost' => $this->totalCost(), 'discounts' => $applied, 'totalDiscount' => Money::fromMinorUnits(Money::sum(array_column($applied, 'cents'))),
+            'total' => Money::fromMinorUnits(Money::sum([$subtotal, $taxTotal, $tip, $legacy]))];
     }
 }
