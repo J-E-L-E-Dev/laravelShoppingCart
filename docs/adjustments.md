@@ -633,8 +633,9 @@ For HKA, independently in each tax category:
 1. Compute grouped fiscal VAT in integer minor units.
 2. Compute each line's provisional HALF_UP VAT in minor units.
 3. Subtract the sum of provisionals from grouped VAT.
-4. Assign the entire signed difference to the largest provisional tax; ties use
-   the largest quantized base, then the lexicographically smallest rowId.
+4. Order by largest provisional tax, largest quantized base, then lexicographically
+   smallest rowId. Add a positive difference entirely to the first item. Subtract a
+   negative difference in that order, taking at most each item's available tax.
 
 No residual is moved to another tax category. Zero difference does nothing.
 GENERAL and PNP need no reconciliation. HKA's result is deterministic and independent
@@ -650,11 +651,11 @@ Difference: .31 − (.16 + .14) = +.01
 A.tax = .17; B.tax = .14; sum = .31
 ```
 
-The specified single-recipient rule also handles negative and multi-unit differences.
-It can produce a negative informational item tax: ten lines of .04 at 16% have
-provisional tax .01 each, grouped VAT .06 and difference −.04; the selected item
-becomes −.03. No clamping or redistribution is applied, because that would change
-the specified rule. The grouped fiscal total remains .06.
+Negative differences never make an item tax negative. Ten lines of .04 at 16%
+have provisional tax .01 each, grouped VAT .06 and difference −.04. The first
+four items in the deterministic order become zero; the remaining six keep .01.
+Their sum is exactly .06. If the available tax cannot absorb the subtraction,
+reconciliation throws a LogicException instead of returning an invalid result.
 
 Original taxes reconcile against `totalTaxes(content, [])`, **not** against
 `summary()['taxes']` when costs or discounts change final bases. Adjustments never

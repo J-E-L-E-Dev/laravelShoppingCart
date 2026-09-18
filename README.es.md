@@ -119,8 +119,9 @@ HKA reconcilia los IVA provisionales con el IVA fiscal agrupado, separadamente
 por alícuota. Ejemplo: A, cantidad 3 × 0.34, tiene base 1.02 e IVA provisional
 0.16; B, cantidad 1 × 0.89, tiene IVA provisional 0.14. El IVA agrupado es
 `1.91 × 16% → 0.31`, por lo que **A.tax = 0.17 y B.tax = 0.14**.
-Toda la diferencia, con su signo, se asigna a la fila de mayor IVA provisional,
-luego mayor base cuantizada y finalmente menor rowId lexicográfico. Se recalcula
+Se ordenan las filas por mayor IVA provisional, mayor base cuantizada y menor
+rowId lexicográfico. La diferencia positiva se suma a la primera; la negativa
+se resta en ese orden, sin bajar ninguna fila de cero. Se recalcula
 sobre productos originales, independientemente de los ajustes documentales.
 
 `content()`, `get()`, `getById()` y `getByRowId()` conservan los objetos originales

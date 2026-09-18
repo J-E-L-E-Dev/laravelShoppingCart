@@ -109,6 +109,9 @@ class MonetaryPrecisionTest extends TestCase
     {
         $a = $this->cart->add(26411, 'A', 3, .34, 0);
         $b = $this->cart->add(21766, 'B', 1, .89, 0);
+        $luxury = $this->cart->add('luxury', 'Luxury', 1, 16.68, 3);
+        self::assertSame(517, Money::minorUnits($luxury->tax));
+        self::assertSame(517, Money::minorUnits($this->cart->tax()['LUXURY']['value']));
         self::assertSame(17, Money::minorUnits($a->tax)); // La referencia anterior a add(B) se actualiza derivadamente.
         self::assertSame(14, Money::minorUnits($b->tax));
         self::assertSame('1.02', $a->subtotal);
@@ -142,26 +145,30 @@ class MonetaryPrecisionTest extends TestCase
 
     public static function hkaResidues(): array
     {
-        return [
-            'positivo multiunidad' => [.03, 20, 10, 10],
-            'negativo multiunidad' => [.10, 5, 8, 0],
-            'negativo unitario' => [.04, 2, 1, 0],
-            // La regla solicitada asigna TODO el residuo, incluso si supera el provisional receptor.
-            'negativo mayor que provisional' => [.04, 10, 6, -3],
-        ];
+        $cases = [];
+        foreach ([2, 3] as $decimals) {
+            $scale = 10 ** $decimals;
+            $cases['positivo multiunidad '.$decimals] = [$decimals, 3 / $scale, [10, ...array_fill(0, 19, 0)]];
+            $cases['negativo un receptor '.$decimals] = [$decimals, 10 / $scale, [0, 2, 2, 2, 2]];
+            $cases['negativo unitario '.$decimals] = [$decimals, 4 / $scale, [0, 1]];
+            $cases['negativo varios receptores '.$decimals] = [$decimals, 4 / $scale, [0, 0, 0, 0, 1, 1, 1, 1, 1, 1]];
+        }
+        return $cases;
     }
 
     /** @dataProvider hkaResidues */
-    public function testHkaSignedResidueAndLexicalTieBreak($price, $count, $totalTax, $selectedTax): void
+    public function testHkaSignedResidueAndLexicalTieBreak($decimals, $price, $distribution): void
     {
+        config(['cart.driver' => 'HKA', 'cart.format.decimals' => $decimals]);
+        $count = count($distribution);
         $expected = null;
         foreach ([range(1, $count), array_reverse(range(1, $count))] as $order) {
             $this->cart->destroy();
             foreach ($order as $id) $this->cart->add('P'.$id, 'P', 1, $price, 0);
             $map = $this->cart->content()->map(function ($item) { return Money::minorUnits($item->tax); })->all();
             ksort($map, SORT_STRING);
-            self::assertSame($selectedTax, reset($map));
-            self::assertSame($totalTax, array_sum($map));
+            self::assertSame($distribution, array_values($map));
+            self::assertSame(array_sum($distribution), array_sum($map));
             if ($expected !== null) self::assertSame($expected, $map);
             $expected = $map;
             $this->assertTaxSums();
@@ -186,6 +193,38 @@ class MonetaryPrecisionTest extends TestCase
         $this->cart->add('C', 'C', 1, .03, 0);
         self::assertSame(2, Money::minorUnits($b->tax));
         $this->assertTaxSums();
+    }
+
+    public function testHkaMixedResiduesAndNegativePriorityAtTwoAndThreeDecimals(): void
+    {
+        foreach ([2, 3] as $decimals) {
+            config(['cart.driver' => 'HKA', 'cart.format.decimals' => $decimals]);
+            $scale = Money::scale();
+            $expected = null;
+            $rows = [
+                ['largest-tax', 10, 0], ['largest-tied-base', 9, 0],
+                ['reduced-a', 3, 2], ['reduced-b', 4, 2],
+                ['luxury', 1668, 3], ['exempt', 999, 1],
+            ];
+            for ($i = 0; $i < 8; $i++) $rows[] = ['small-'.$i, 4, 0];
+            foreach ([$rows, array_reverse($rows)] as $order) {
+                $this->cart->destroy();
+                foreach ($order as [$id, $base, $aliquot]) $this->cart->add($id, $id, 1, $base / $scale, $aliquot);
+                // GENERAL: provisional 2 + 1 + 8 = 11; fiscal 8; agota los dos primeros.
+                self::assertSame(0, Money::minorUnits($this->cart->getById('largest-tax')->tax));
+                self::assertSame(0, Money::minorUnits($this->cart->getById('largest-tied-base')->tax));
+                for ($i = 0; $i < 8; $i++) self::assertSame(1, Money::minorUnits($this->cart->getById('small-'.$i)->tax));
+                self::assertSame(0, Money::minorUnits($this->cart->getById('reduced-a')->tax));
+                self::assertSame(1, Money::minorUnits($this->cart->getById('reduced-b')->tax));
+                self::assertSame(517, Money::minorUnits($this->cart->getById('luxury')->tax));
+                self::assertSame(0, Money::minorUnits($this->cart->getById('exempt')->tax));
+                $this->assertTaxSums();
+                $map = $this->cart->content()->map(function ($item) { return Money::minorUnits($item->tax); })->all();
+                ksort($map, SORT_STRING);
+                if ($expected !== null) self::assertSame($expected, $map);
+                $expected = $map;
+            }
+        }
     }
 
     public static function drivers(): array { return [['GENERAL'], ['HKA'], ['PNP']]; }
@@ -423,6 +462,7 @@ class MonetaryPrecisionTest extends TestCase
             foreach ($content as $key => $item) {
                 if ($item->aliquot != $aliquot) continue;
                 $value = Money::minorUnits($item->tax);
+                self::assertGreaterThanOrEqual(0, $value);
                 self::assertSame($value, Money::minorUnits($item->toArray()['tax']));
                 self::assertSame($value, Money::minorUnits(json_decode($item->toJson(), true)['tax']));
                 self::assertSame($value, Money::minorUnits($json[$key]['tax']));

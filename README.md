@@ -118,8 +118,9 @@ HKA reconciles the provisional item taxes with grouped fiscal VAT, separately fo
 each tax category. Example: A, quantity 3 × 0.34, has base 1.02 and provisional
 VAT 0.16; B, quantity 1 × 0.89, has provisional VAT 0.14. Grouped VAT is
 `1.91 × 16% → 0.31`, so **A.tax = 0.17 and B.tax = 0.14**.
-The entire signed difference goes to the line with the largest provisional tax,
-then largest quantized base, then lexicographically smallest rowId. This is
+Items are ordered by largest provisional tax, largest quantized base, then
+lexicographically smallest rowId. A positive difference goes entirely to the first
+item; a negative difference is subtracted in order, stopping each item at zero. This is
 recalculated from original products, independently of document adjustments.
 
 `content()`, `get()`, `getById()` and `getByRowId()` keep the original objects and

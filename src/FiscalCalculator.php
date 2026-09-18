@@ -16,8 +16,9 @@ final class FiscalCalculator
      * Devuelve impuestos por catálogo y un mapa de impuestos por clave de fila en enteros.
      * GENERAL suma HALF_UP por fila; PNP suma IVA truncado de rawBase por fila.
      * HKA calcula IVA agrupado y reconcilia provisionales por mayor IVA, mayor base,
-     * y clave lexicográfica menor. El residuo completo, positivo o negativo, queda
-     * en una sola fila de la misma alícuota. No se modifica ninguna base.
+     * y clave lexicográfica menor. El residuo positivo queda en la primera fila;
+     * el negativo se resta en ese orden sin bajar de cero, dentro de la alícuota.
+     * No se modifica ninguna base.
      */
     public static function calculate(array $lines, $driver, array $taxes = [])
     {
@@ -44,7 +45,20 @@ final class FiscalCalculator
                             ?: ($group[$b]['base'] <=> $group[$a]['base'])
                             ?: strcmp((string) $a, (string) $b);
                     });
-                    $provisional[$keys[0]] += $difference;
+                    if ($difference > 0) {
+                        $provisional[$keys[0]] += $difference;
+                    } else {
+                        $remaining = abs($difference);
+                        foreach ($keys as $key) {
+                            $removable = min($provisional[$key], $remaining);
+                            $provisional[$key] -= $removable;
+                            $remaining -= $removable;
+                            if ($remaining === 0) break;
+                        }
+                        if ($remaining !== 0) {
+                            throw new \LogicException('HKA tax reconciliation cannot exhaust the negative difference.');
+                        }
+                    }
                 }
             }
             foreach ($provisional as $key => $units) $lineTaxes[$key] = $units;

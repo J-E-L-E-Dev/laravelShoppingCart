@@ -634,8 +634,9 @@ HKA ejecuta por separado para cada alícuota:
 1. Calcula IVA fiscal agrupado en unidades menores enteras.
 2. Calcula IVA provisional HALF_UP de cada fila en unidades menores.
 3. Resta la suma provisional al IVA agrupado.
-4. Asigna toda la diferencia con su signo a la fila de mayor IVA provisional;
-   desempata por mayor base cuantizada y luego menor rowId lexicográfico.
+4. Ordena por mayor IVA provisional, mayor base cuantizada y menor rowId
+   lexicográfico. Suma toda la diferencia positiva a la primera fila. Resta la
+   negativa en ese orden, tomando como máximo el impuesto disponible en cada fila.
 
 No traslada residuos entre alícuotas. Diferencia cero no hace nada. GENERAL y PNP
 no necesitan reconciliación. El resultado HKA es determinista, independiente del
@@ -651,11 +652,11 @@ Diferencia: .31 − (.16 + .14) = +.01
 A.tax = .17; B.tax = .14; suma = .31
 ```
 
-La regla de receptor único también aplica residuos negativos y de varias unidades.
-Puede producir IVA individual informativo negativo: diez filas de .04 al 16%
-tienen provisional .01 cada una, IVA agrupado .06 y diferencia −.04; la seleccionada
-queda en −.03. No se limita ni redistribuye ese importe, pues cambiaría la regla
-especificada. El total fiscal agrupado sigue siendo .06.
+Los residuos negativos nunca dejan un impuesto individual negativo. Diez filas
+de .04 al 16% tienen provisional .01 cada una, IVA agrupado .06 y diferencia −.04.
+Las primeras cuatro filas del orden determinista quedan en cero; las otras seis
+conservan .01. Su suma es exactamente .06. Si el impuesto disponible no permite
+absorber la resta, se lanza LogicException en lugar de devolver un resultado inválido.
 
 Los impuestos originales se reconcilian contra `totalTaxes(content, [])`, **no**
 contra `summary()['taxes']` cuando los ajustes cambian las bases finales. Ningún

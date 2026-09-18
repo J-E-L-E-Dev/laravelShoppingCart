@@ -124,7 +124,7 @@ final class Money
         if (!is_int($amount) || $amount < 0 || !is_int($total) || $total > intdiv(PHP_INT_MAX, 4)) {
             throw new \InvalidArgumentException('Allocation exceeds the supported integer range.');
         }
-        foreach ($weights as $weight) if (!is_int($weight) || $weight < 0) throw new \InvalidArgumentException('Allocation weights must be nonnegative integer cents.');
+        foreach ($weights as $weight) if (!is_int($weight) || $weight < 0) throw new \InvalidArgumentException('Allocation weights must be nonnegative integer minor units.');
         $result = array_fill_keys(array_keys($weights), 0);
         if (!$amount) return $result;
         if ($total <= 0) throw new \DomainException('A positive product base is required for allocation.');
