@@ -27,7 +27,7 @@ Podemos agregar la dependencia en nuestro archivo `composer.json`:
 
 ```json
     "require": {
-        "edwinylil1/laravelshoppingcart": "~2.0.0",
+        "edwinylil1/laravelshoppingcart": "^3.0",
     },
 ```
 
@@ -36,6 +36,10 @@ o ejecutar
 ```bash
     composer require edwinylil1/laravelshoppingcart
 ```
+
+Para actualizar desde 2.x, revisar [CHANGELOG.es.md](CHANGELOG.es.md) y la
+[guía de ajustes](docs/adjustments.es.md#actualización-desde-2x-a-3x): v3 cambia
+la semántica fiscal y la precisión monetaria.
 
 ## Gu&iacute;a del usuario
 

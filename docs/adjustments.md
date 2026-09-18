@@ -818,6 +818,17 @@ for the active instance.
 
 ## Upgrade Considerations
 
+### Upgrading from 2.x to 3.x
+
+- `CartItem::tax` is VAT for the entire row: use `$item->tax`, not `$item->tax * $item->qty`. `taxTotal` presents the same row VAT. `unitTax` and `priceTax` remain per-unit values.
+- `cart.format.decimals` controls actual monetary/fiscal calculations as well as formatting. Review GENERAL totals (HALF_UP per row), PNP totals (truncated VAT on each complete raw row base), and HKA totals (grouped bases and reconciliation by tax category).
+- Review `cart.taxes`: it must contain exactly keys 0, 1, 2, and 3, with no omissions or extra categories. Names must be unique and rates numeric, finite, and nonnegative.
+- `discount.value` preserves `int|float|numeric-string`; do not assume float or unnecessarily convert exact strings. `fixedUnits` preserves a fixed discount's quantization history.
+- Use `summary()` to settle products, costs, and discounts fiscally; do not reconstruct the document by multiplying taxes or adding adjustments already included.
+- Valid legacy and v2 snapshots remain compatible. V2 uses its historical two-decimal precision; v3 includes explicit precision and must not be consumed by older versions. No mandatory SQL migration is needed; restore/merge reject corrupt data before incorporating it.
+
+See [CHANGELOG.md](../CHANGELOG.md) for the v3.0.0 breaking changes in detail.
+
 ### `rowId`
 
 Current identities include:

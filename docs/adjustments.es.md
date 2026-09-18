@@ -820,6 +820,17 @@ para la instancia activa.
 
 ## Consideraciones al actualizar
 
+### Actualización desde 2.x a 3.x
+
+- `CartItem::tax` es el IVA de la fila completa: usar `$item->tax`, no `$item->tax * $item->qty`. `taxTotal` presenta el mismo IVA de fila. `unitTax` y `priceTax` siguen siendo unitarios.
+- `cart.format.decimals` controla cálculos monetarios/fiscales reales además del formato. Revisar los totales GENERAL (HALF_UP por fila), PNP (IVA truncado sobre la base raw completa de cada fila) y HKA (bases agrupadas y reconciliación por alícuota).
+- Revisar `cart.taxes`: debe contener exactamente las claves 0, 1, 2 y 3, sin omisiones ni categorías adicionales. Los nombres deben ser únicos y las tasas numéricas, finitas y no negativas.
+- `discount.value` conserva `int|float|numeric-string`; no asumir float ni convertir strings exactos innecesariamente. `fixedUnits` conserva el historial de cuantización del descuento fijo.
+- Usar `summary()` para liquidar fiscalmente productos, costos y descuentos; no reconstruir el documento multiplicando impuestos ni agregando ajustes ya incluidos.
+- Los snapshots legacy y v2 válidos siguen siendo compatibles. V2 usa dos decimales históricos; v3 incorpora precisión explícita y no debe consumirse con versiones antiguas. No hay migración SQL obligatoria; restore/merge rechazan datos corruptos antes de incorporarlos.
+
+Consultar [CHANGELOG.es.md](../CHANGELOG.es.md) para el detalle de los cambios incompatibles de v3.0.0.
+
 ### `rowId`
 
 Las identidades actuales incluyen:

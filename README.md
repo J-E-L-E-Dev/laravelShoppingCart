@@ -2,7 +2,7 @@
 
 The cart now supports persistent ITEM/PRORATED costs, tips, line/document discounts,
 structured observations and safe lookup by product code. See the
-[adjustments and migration guide (Spanish)](docs/adjustments.es.md) for the complete
+[adjustments and migration guide](docs/adjustments.md) for the complete
 API, calculation order, rounding rules and compatibility changes. Use `summary()`
 for adjusted invoice bases; `content()` retains original product attributes.
 
@@ -27,7 +27,7 @@ We can add the dependency in our `composer.json` file:
 
 ```json
     "require": {
-        "edwinylil1/laravelshoppingcart": "~2.0.0",
+        "edwinylil1/laravelshoppingcart": "^3.0",
     },
 ```
 
@@ -36,6 +36,10 @@ or execute
 ```bash
     composer require edwinylil1/laravelshoppingcart
 ```
+
+When upgrading from 2.x, review [CHANGELOG.md](CHANGELOG.md) and the
+[adjustments guide](docs/adjustments.md#upgrading-from-2x-to-3x): v3 changes
+fiscal semantics and monetary precision.
 
 ## User guide
 
