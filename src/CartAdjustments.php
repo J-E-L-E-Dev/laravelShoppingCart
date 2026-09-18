@@ -32,8 +32,8 @@ trait CartAdjustments
      *
      * Si la clave falta devuelve precisión y tres listas vacías. Los costos conservan importe
      * cuantizado y cents; los descuentos guardan la instrucción solicitada; solamente
-     * las observaciones manuales se almacenan en observations. Valida la estructura
-     * antes de convertir importes, sin liquidar fiscalmente cada operación.
+     * las observaciones manuales se almacenan en observations. Valida estructura y
+     * reglas de dominio antes de convertir importes, sin liquidar cada operación.
      *
      * @return array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} Estado documental de la instancia.
      */
@@ -48,6 +48,7 @@ trait CartAdjustments
      * Interpreta cents con su escala almacenada; registros históricos sin escala son de 2 decimales.
      * No modifica la sesión durante consultas. Al guardar una operación se materializa la
      * precisión actual. Reducir precisión aplica HALF_UP; aumentar no inventa fracciones.
+     * Valida todas las entradas antes de convertir; amount se reconstruye desde cents.
      */
     private function normalizeMetadata($metadata)
     {
@@ -55,22 +56,11 @@ trait CartAdjustments
         foreach (['costs', 'discounts', 'observations'] as $key) {
             if (!isset($metadata[$key]) || !is_array($metadata[$key])) throw new \InvalidArgumentException('Invalid cart metadata: '.$key.' must be an array.');
         }
-        foreach ($metadata['costs'] as $cost) {
-            if (!is_array($cost) || !isset($cost['mode'], $cost['cents'], $cost['name'])
-                || !is_string($cost['mode']) || !is_string($cost['name']) || !is_int($cost['cents'])) {
-                throw new \InvalidArgumentException('Invalid cart metadata: invalid cost entry.');
-            }
-        }
-        foreach ($metadata['discounts'] as $discount) {
-            if (!is_array($discount) || !isset($discount['type'], $discount['value'])
-                || !is_string($discount['type']) || !is_numeric($discount['value'])
-                || !is_finite((float) $discount['value']) || !array_key_exists('rowId', $discount)
-                || ($discount['rowId'] !== null && !is_string($discount['rowId']) && !is_int($discount['rowId']))) {
-                throw new \InvalidArgumentException('Invalid cart metadata: invalid discount entry.');
-            }
-        }
         $from = Money::decimals($metadata['decimals'] ?? 2);
         $to = Money::decimals();
+        foreach ($metadata['costs'] as $cost) $this->validateCostMetadataEntry($cost, $from);
+        foreach ($metadata['discounts'] as $discount) $this->validateDiscountMetadataEntry($discount, $from, $to);
+        foreach ($metadata['observations'] as $observation) $this->validateObservationMetadataEntry($observation);
         foreach ($metadata['costs'] as &$cost) {
             $cost['cents'] = Money::rescale($cost['cents'], $from, $to);
             $cost['amount'] = Money::fromMinorUnits($cost['cents']);
@@ -85,6 +75,55 @@ trait CartAdjustments
         unset($discount);
         $metadata['decimals'] = $to;
         return $metadata;
+    }
+
+    /** Valida costos persistidos según los modos que puede producir addCost(). amount es derivado. */
+    private function validateCostMetadataEntry($cost, $decimals)
+    {
+        if (!is_array($cost) || !isset($cost['name'], $cost['cents'], $cost['mode'], $cost['description'])
+            || !is_string($cost['name']) || $cost['name'] === '' || !is_int($cost['cents']) || $cost['cents'] < 0
+            || !is_string($cost['description']) || $cost['description'] === ''
+            || !array_key_exists('aliquot', $cost)
+            || !in_array($cost['mode'], [self::COST_ITEM, self::COST_PRORATED, 'tip', 'legacy'], true)) {
+            throw new \InvalidArgumentException('Invalid cart metadata: invalid cost entry.');
+        }
+        if (($cost['mode'] === 'tip') !== ($cost['name'] === self::COST_TIP)) {
+            throw new \InvalidArgumentException('Invalid cart metadata: tip name and mode must match.');
+        }
+        if ($cost['mode'] === self::COST_ITEM) FiscalCalculator::taxRate($cost['aliquot']);
+        elseif ($cost['aliquot'] !== null) throw new \InvalidArgumentException('Invalid cart metadata: only ITEM costs may have an aliquot.');
+        Money::minorUnits(Money::fromMinorUnits($cost['cents'], $decimals), false, $decimals);
+    }
+
+    /** Conserva value solicitado y fixedUnits convertido; pueden diferir tras cambios de precisión. */
+    private function validateDiscountMetadataEntry($discount, $from, $to)
+    {
+        if (!is_array($discount) || !isset($discount['type'], $discount['value'], $discount['concept'])
+            || !in_array($discount['type'], ['percentage', 'fixed'], true)
+            || !is_numeric($discount['value']) || !is_finite((float) $discount['value']) || $discount['value'] < 0
+            || ($discount['type'] === 'percentage' && $discount['value'] > 100)
+            || !is_string($discount['concept']) || !array_key_exists('rowId', $discount)
+            || ($discount['rowId'] !== null && !is_string($discount['rowId']) && !is_int($discount['rowId']))) {
+            throw new \InvalidArgumentException('Invalid cart metadata: invalid discount entry.');
+        }
+        if ($discount['type'] === 'fixed') {
+            Money::minorUnits($discount['value'], false, $from);
+            if (array_key_exists('fixedUnits', $discount)) {
+                if (!is_int($discount['fixedUnits']) || $discount['fixedUnits'] < 0) {
+                    throw new \InvalidArgumentException('Invalid cart metadata: fixedUnits must be a nonnegative integer.');
+                }
+                Money::rescale($discount['fixedUnits'], $from, $to);
+            }
+        }
+    }
+
+    /** Sólo las observaciones manuales se persisten; las automáticas se derivan al consultar. */
+    private function validateObservationMetadataEntry($observation)
+    {
+        if (!is_array($observation) || ($observation['type'] ?? null) !== 'manual'
+            || !isset($observation['text']) || !is_string($observation['text']) || trim($observation['text']) === '') {
+            throw new \InvalidArgumentException('Invalid cart metadata: observations must contain manual, nonempty text.');
+        }
     }
 
     /** Valida sobres v2/v3 y convierte los metadatos antes de restore/merge. */
@@ -235,6 +274,9 @@ trait CartAdjustments
      */
     private function registerDiscount($rowId, $type, $value, $concept)
     {
+        if (!is_null($concept) && !is_scalar($concept) && !$concept instanceof \Stringable) {
+            throw new \InvalidArgumentException('Discount concept must be convertible to a string.');
+        }
         if (!in_array($type, ['percentage', 'fixed'], true) || !is_numeric($value) || !is_finite((float) $value) || $value < 0 || ($type === 'percentage' && $value > 100)) {
             throw new \InvalidArgumentException('Discount must be nonnegative: percentage (0–100) or fixed.');
         }

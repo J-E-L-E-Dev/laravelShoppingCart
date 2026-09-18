@@ -1037,6 +1037,117 @@ class MonetaryPrecisionTest extends TestCase
         }
     }
 
+    public static function invalidSemanticMetadata(): array
+    {
+        $cases = [];
+        $cost = ['name' => 'installation', 'mode' => 'item', 'cents' => 100, 'aliquot' => 0, 'description' => 'Installation'];
+        foreach (['cents' => [-100, -1, '-1', 1.5, null, INF], 'mode' => ['unknown', '', 'tax'],
+            'aliquot' => [null, 9], 'description' => [[], new \stdClass(), null, ''], 'name' => ['', null]] as $field => $values) {
+            foreach ($values as $key => $value) $cases['cost '.$field.' '.$key] = ['costs', array_replace($cost, [$field => $value])];
+        }
+        foreach ([['mode' => 'prorated'], ['mode' => 'legacy'], ['mode' => 'tip', 'name' => 'tip'],
+            ['mode' => 'tip', 'aliquot' => null], ['mode' => 'legacy', 'name' => 'tip', 'aliquot' => null],
+            ['name' => 'tip'], ['name' => 'tip', 'mode' => 'prorated', 'aliquot' => null]] as $key => $override) {
+            $cases['cost mode relation '.$key] = ['costs', array_replace($cost, $override)];
+        }
+        $discount = ['rowId' => null, 'type' => 'percentage', 'value' => 5, 'concept' => 'Discount'];
+        foreach (['type' => ['unknown', '', null], 'value' => [-10, -1, -.01, 100.01, 150, INF, -INF, NAN, 'abc'],
+            'concept' => [[], new \stdClass(), null], 'rowId' => [[], new \stdClass(), true]] as $field => $values) {
+            foreach ($values as $key => $value) $cases['discount '.$field.' '.$key] = ['discounts', array_replace($discount, [$field => $value])];
+        }
+        foreach ([-1, 1000000001] as $key => $value) $cases['fixed value '.$key] = ['discounts', array_replace($discount, ['type' => 'fixed', 'value' => $value])];
+        foreach ([-1, '100', 1.5, null, PHP_INT_MAX] as $key => $units) {
+            $cases['fixed units '.$key] = ['discounts', array_replace($discount, ['type' => 'fixed', 'fixedUnits' => $units])];
+        }
+        foreach (['abc', [], ['text' => 'Text'], ['type' => 'manual'], ['type' => 'tip', 'text' => 'Tip'],
+            ['type' => 'discount', 'text' => 'Discount'], ['type' => 'manual', 'text' => []],
+            ['type' => 'manual', 'text' => ''], ['type' => 'manual', 'text' => '   ']] as $key => $observation) {
+            $cases['observation '.$key] = ['observations', $observation];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider invalidSemanticMetadata */
+    public function testSemanticMetadataRejectsSessionAndSnapshotsAtomically($section, $entry): void
+    {
+        $this->cart->add('source', 'Source', 2, 10, 0);
+        $this->cart->addCost('installation', 1, 'item', 0);
+        $this->cart->addDiscount('fixed', .5, 'Saved');
+        $this->cart->addObservation('Saved note');
+        $this->cart->store('source');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        $this->cart->destroy();
+        $this->cart->add('current', 'Current', 1, 20, 0);
+        $this->cart->addObservation('Current note');
+        $this->cart->createdAt = new \Carbon\Carbon('2020-01-01');
+        $this->cart->updatedAt = new \Carbon\Carbon('2020-02-01');
+        $valid = $this->session->get('cart_metadata.shopping_cart');
+        $corrupt = $valid;
+        $corrupt[$section] = [$entry];
+        $this->session->put('cart_metadata.shopping_cart', $corrupt);
+        $this->assertRejectedWithoutMutation(fn () => $this->cart->summary());
+        $this->session->put('cart_metadata.shopping_cart', $valid);
+        foreach ([2, 3] as $version) {
+            $snapshot['version'] = $version;
+            $snapshot['metadata'][$section] = [$entry];
+            if ($version === 2) unset($snapshot['decimals']);
+            else $snapshot['decimals'] = 2;
+            $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+            foreach (['restore', 'merge'] as $operation) $this->assertRejectedWithoutMutation(fn () => $this->cart->$operation('source'));
+        }
+    }
+
+    public function testPublicMetadataRemainsValidAcrossVersionsAndPrecisionChanges(): void
+    {
+        foreach ([2, 3] as $version) foreach (['restore', 'merge'] as $operation) {
+            $this->cart->destroy();
+            config(['cart.format.decimals' => 2]);
+            $this->cart->add('A', 'A', 1, 100, 0);
+            $this->cart->addCost('installation', 1, 'item', 0);
+            $this->cart->addCost('freight', 1, 'prorated');
+            $this->cart->addCost('tip', 1);
+            $this->cart->addCost('legacy', 1);
+            foreach ([0, 5, 100, '10.5'] as $value) $this->cart->addDiscount('percentage', $value, 'Percentage');
+            $this->cart->addDiscount('fixed', 0, 'Zero');
+            $this->cart->addDiscountToItem('A', 'fixed', .125, 'Requested value');
+            $this->cart->addObservation(' Manual note ');
+            $id = 'valid-'.$version.'-'.$operation;
+            $this->cart->store($id);
+            $snapshot = unserialize($this->db->table('shopping_cart')->where('identifier', $id)->value('content'));
+            $snapshot['version'] = $version;
+            if ($version === 2) { unset($snapshot['decimals']); unset($snapshot['metadata']['discounts'][5]['fixedUnits']); }
+            $snapshot['metadata']['costs'][0]['amount'] = new \stdClass();
+            $this->db->table('shopping_cart')->where('identifier', $id)->update(['content' => serialize($snapshot)]);
+            $this->cart->destroy();
+            config(['cart.format.decimals' => 3]);
+            $this->cart->$operation($id);
+            $metadata = $this->session->get('cart_metadata.shopping_cart');
+            self::assertSame(['item', 'prorated', 'tip', 'legacy'], array_column($metadata['costs'], 'mode'));
+            self::assertEquals(1, $metadata['costs'][0]['amount']);
+            self::assertSame(.125, $metadata['discounts'][5]['value']);
+            self::assertSame(130, $metadata['discounts'][5]['fixedUnits']);
+            self::assertSame(125, Money::minorUnits($metadata['discounts'][5]['value']));
+            self::assertSame([['type' => 'manual', 'text' => ' Manual note ']], $metadata['observations']);
+            self::assertGreaterThanOrEqual(0, $this->cart->summary()['tax']);
+            $this->cart->addObservation('Retain converted units');
+            self::assertSame(130, $this->session->get('cart_metadata.shopping_cart')['discounts'][5]['fixedUnits']);
+        }
+    }
+
+    public function testPublicDescriptionAndConceptRejectIncompatibleTypesBeforeWriting(): void
+    {
+        $this->cart->add('A', 'A', 1, 10, 0);
+        foreach ([[], new \stdClass(), 1, false] as $description) {
+            $this->assertRejectedWithoutMutation(fn () => $this->cart->addCost('cost', 1, null, null, $description));
+        }
+        foreach ([[], new \stdClass()] as $concept) {
+            $this->assertRejectedWithoutMutation(fn () => $this->cart->addDiscount('fixed', 1, $concept));
+            $this->assertRejectedWithoutMutation(fn () => $this->cart->addDiscountToItem('A', 'fixed', 1, $concept));
+        }
+        foreach ([null, '', 'Valid'] as $description) $this->cart->addCost('cost', 1, null, null, $description);
+        self::assertSame(['cost', 'cost', 'Valid'], array_column($this->cart->costs()->all(), 'description'));
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();
