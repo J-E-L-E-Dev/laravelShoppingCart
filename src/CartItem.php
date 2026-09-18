@@ -189,7 +189,7 @@ class CartItem implements Arrayable, Jsonable, \JsonSerializable
         if (!is_numeric($price) || !is_finite((float) $price) || $price < 0) throw new \InvalidArgumentException('Invalid price.');
         Money::minorUnits($price);
         $aliquot = $aliquot === null ? config('cart.default_aliquot') : $aliquot;
-        if (!array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('Invalid aliquot.');
+        FiscalCalculator::taxRate($aliquot);
 
         $this->id       = $id;
         $this->name     = $name;
@@ -354,37 +354,39 @@ class CartItem implements Arrayable, Jsonable, \JsonSerializable
      *
      * Pese al nombre del parámetro, recibe una clave de catálogo, no un porcentaje.
      * Null usa cart.default_aliquot. Si cambia su representación string actualiza
-     * aliquot y rowId; después actualiza taxRate y el campo histórico priceTax.
+     * aliquot y rowId; valida la tasa y calcula priceTax antes de modificar campos.
      * No mueve claves de sesión ni descuentos: sobre líneas de Cart usar Cart::setTax().
      *
      * @param int|string|null $taxRate Clave de la alícuota.
      * @return $this
-     * @throws \InvalidArgumentException Si la alícuota no existe o Money rechaza el impuesto.
+     * @throws \InvalidArgumentException Si la alícuota o tasa son inválidas o Money rechaza el impuesto.
      */
     public function setTaxRate($taxRate)
     {
         $aliquot = $taxRate === null ? config('cart.default_aliquot') : $taxRate;
-        if (!array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('Invalid aliquot.');
+        $rate = $this->getTaxRate($aliquot);
+        $priceTax = $this->price + self::calculateTaxes($this->price, $rate);
         if ((string) $this->aliquot !== (string) $aliquot) {
             $this->aliquot = $aliquot;
             $this->rowId = $this->identity();
         }
-        $this->taxRate = $this->getTaxRate($aliquot);
-        $this->priceTax = $this->price + self::calculateTaxes($this->price, $this->taxRate);
+        $this->taxRate = $rate;
+        $this->priceTax = $priceTax;
         return $this;
     }
 
     /**
      * Lee el porcentaje configurado de una alícuota sin asignarlo a la línea.
      *
-     * No valida la existencia: config() devuelve null si falta la clave.
+     * Exige una alícuota existente y tasa numérica, finita y no negativa.
      *
      * @param int|string $aliquot Clave de cart.taxes.
-     * @return int|float|numeric-string|null Valor configurado o null.
+     * @return int|float|numeric-string Valor configurado validado.
+     * @throws \InvalidArgumentException Si la configuración o la tasa no son válidas.
      */
     public function getTaxRate($aliquot)
     {
-        return config('cart.taxes.'.$aliquot.'.value');
+        return FiscalCalculator::taxRate($aliquot);
     }
 
     /**
@@ -454,8 +456,9 @@ class CartItem implements Arrayable, Jsonable, \JsonSerializable
      *
      * Multiplica price por tax_rate / 100. GENERAL y HKA redondean la mitad hacia
      * arriba a unidades menores; PNP trunca hacia cero. Un driver desconocido usa GENERAL.
-     * La tasa recibida ya es un porcentaje: este método no consulta su alícuota
-     * ni agrupa productos. Devuelve un número crudo, no un importe formateado.
+     * La tasa recibida debe ser numérica, finita y no negativa. Ya es un porcentaje:
+     * este método no consulta su alícuota ni agrupa productos.
+     * Devuelve un número crudo, no un importe formateado.
      * La estrategia de acumulación pertenece a Cart: GENERAL entrega la base
      * completa de una línea fiscal; PNP entrega la entrada sin truncar de esa fila;
      * HKA agrupa bases en FiscalCalculator. unitTax no sustituye el IVA de fila.
@@ -467,6 +470,7 @@ class CartItem implements Arrayable, Jsonable, \JsonSerializable
      */
     public static function calculateTaxes($price, $tax_rate)
     {
+        FiscalCalculator::validateTaxRate($tax_rate);
         switch (config('cart.driver')) {
             case 'GENERAL':
                 return self::generalDriver($price, $tax_rate);

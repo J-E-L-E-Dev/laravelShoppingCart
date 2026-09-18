@@ -11,6 +11,7 @@ use Illuminate\Support\Collection;
 use JeleDev\Shoppingcart\Cart;
 use JeleDev\Shoppingcart\CartItem;
 use JeleDev\Shoppingcart\Money;
+use JeleDev\Shoppingcart\FiscalCalculator;
 use PHPUnit\Framework\TestCase;
 
 class MonetaryPrecisionTest extends TestCase
@@ -452,6 +453,93 @@ class MonetaryPrecisionTest extends TestCase
     }
 
     /** Comprueba cada alícuota en JSON, toArray, tax y totalTaxes de productos originales. */
+    public static function invalidTaxRates(): array
+    {
+        return [[-1], [-.01], ['-16'], [NAN], [INF], [-INF], ['abc'], [null], [true], [[]], ['-1e-9999']];
+    }
+
+    /** @dataProvider invalidTaxRates */
+    public function testInvalidTaxRatesRejectEveryFiscalRouteWithoutMutation($rate): void
+    {
+        $item = $this->cart->add('A', 'A', 2, 10.23, 0, ['color' => 'blue']);
+        $this->cart->addDiscountToItem('A', 'percentage', 10, 'Discount');
+        $this->cart->addCost('freight', 1, 'prorated');
+        $this->cart->store('tax-validation');
+        $beforeItem = serialize($item);
+        $beforeSession = serialize($this->session->all());
+        $beforeSnapshot = serialize($this->db->table('shopping_cart')->get()->all());
+        config(['cart.taxes.0.value' => $rate]);
+        foreach (['GENERAL', 'PNP', 'HKA'] as $driver) {
+            config(['cart.driver' => $driver]);
+            $routes = [
+                fn () => CartItem::calculateTaxes(10, $rate),
+                fn () => FiscalCalculator::calculate(['a' => ['base' => 1000, 'rawBase' => 10, 'aliquot' => 0]], $driver),
+                fn () => $item->setTaxRate(2),
+                fn () => $item->getTaxRate(0),
+                fn () => $item->tax,
+                fn () => $item->unitTax,
+                fn () => $item->toArray(),
+                fn () => $this->cart->summary(),
+                fn () => $this->cart->totalTaxes($this->cart->content(), []),
+                fn () => $this->cart->addCost('invalid', 1, 'item', 0),
+                fn () => $item->updateFromArray(['qty' => 5, 'price' => 20, 'aliquot' => 2]),
+            ];
+            foreach ($routes as $route) {
+                try {
+                    $route();
+                    self::fail('Invalid tax rate accepted by '.$driver);
+                } catch (InvalidArgumentException $e) {
+                    self::assertSame('Invalid tax rate: tax rates must be finite, numeric and nonnegative.', $e->getMessage());
+                }
+                self::assertSame($beforeItem, serialize($item));
+                self::assertSame($beforeSession, serialize($this->session->all()));
+                self::assertSame($beforeSnapshot, serialize($this->db->table('shopping_cart')->get()->all()));
+            }
+        }
+    }
+
+    public static function validTaxRates(): array
+    {
+        return [[0], [8], [16], [31], [150], ['16.0000']];
+    }
+
+    /** @dataProvider validTaxRates */
+    public function testValidTaxRatesAcrossAllDrivers($rate): void
+    {
+        config(['cart.taxes.0.value' => $rate]);
+        foreach (['GENERAL', 'PNP', 'HKA'] as $driver) {
+            config(['cart.driver' => $driver]);
+            $this->cart->destroy();
+            $item = $this->cart->add('A', 'A', 1, 100, 0);
+            self::assertSame($rate, $item->getTaxRate(0));
+            self::assertSame(Money::minorUnits($rate), Money::minorUnits($item->tax));
+            self::assertSame(Money::minorUnits($rate), Money::minorUnits(CartItem::calculateTaxes(100, $rate)));
+            self::assertSame(Money::minorUnits($rate), Money::minorUnits($this->cart->summary()['tax']));
+            $this->assertTaxSums();
+        }
+    }
+
+    public static function malformedTaxCatalogs(): array
+    {
+        return [[null], ['abc'], [16], [[null]], [[['name' => 'GENERAL']]],
+            [[['value' => 16]]], [[['name' => [], 'value' => 16]]], [[['name' => '', 'value' => 16]]]];
+    }
+
+    /** @dataProvider malformedTaxCatalogs */
+    public function testMalformedTaxCatalogIsRejectedWithoutWarningsOrMutation($catalog): void
+    {
+        $item = $this->cart->add('A', 'A', 1, 10, 0);
+        $before = serialize($this->session->all());
+        config(['cart.taxes' => $catalog]);
+        foreach ([fn () => FiscalCalculator::calculate([], 'HKA'), fn () => $this->cart->summary(),
+            fn () => $item->setTaxRate(2), fn () => new CartItem('B', 'B', 1, 0),
+            fn () => $this->cart->addCost('invalid', 1, 'item', 0)] as $route) {
+            try { $route(); self::fail('Malformed tax catalog accepted'); }
+            catch (InvalidArgumentException $e) { self::assertStringContainsString('Invalid tax configuration:', $e->getMessage()); }
+            self::assertSame($before, serialize($this->session->all()));
+        }
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();

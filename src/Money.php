@@ -8,7 +8,7 @@ namespace JeleDev\Shoppingcart;
  * fija la frontera de precisión configurada y evita usar presentación como contabilidad.
  * Los repartos operan con enteros y se convierten a unidades monetarias solo
  * al devolver consultas. No es un motor decimal de precisión arbitraria:
- * minorUnits() convierte la entrada a float y el rango entero depende de PHP.
+ * minorUnits() conserva dígitos decimales de strings; los floats siguen siendo aproximados.
  * Los importes cercanos al límite admitido requieren enteros de 64 bits.
  */
 final class Money
@@ -32,18 +32,44 @@ final class Money
         return 10 ** self::decimals($decimals);
     }
 
-    /** Convierte importes a unidades menores; HALF_UP o truncamiento hacia cero. */
+    /**
+     * Convierte dígitos decimales a enteros, sin redondear previamente el valor escalado.
+     * Los numeric-string conservan su representación exacta, incluida notación científica.
+     * Los floats se normalizan a 15 cifras significativas para quitar ruido IEEE-754
+     * habitual (p. ej. .29); no se recuperan dígitos perdidos ni se distinguen diferencias
+     * más allá de esas cifras. Para fronteras exactas se deben suministrar strings.
+     * Sólo el primer dígito descartado decide HALF_UP; truncar simplemente lo descarta.
+     */
     public static function minorUnits($value, $truncate = false, $decimals = null)
     {
-        $scale = self::scale($decimals);
+        $decimals = self::decimals($decimals);
         if (!is_numeric($value) || !is_finite((float) $value) || abs((float) $value) > 1000000000) {
             throw new \InvalidArgumentException('Invalid monetary value (maximum absolute amount: 1 billion).');
         }
-        $scaled = round((float) $value * $scale, 6);
-        if (abs($scaled) > intdiv(PHP_INT_MAX, 4)) {
+        $decimal = is_float($value)
+            ? str_replace(localeconv()['decimal_point'], '.', sprintf('%.15g', $value))
+            : trim((string) $value);
+        preg_match('/^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/D', $decimal, $parts);
+        $digits = $parts[2] . ($parts[3] ?? '');
+        $significant = ltrim($digits, '0');
+        if ($significant === '') return 0;
+        $exponent = (float) ($parts[4] ?? 0);
+        // Evita desbordar el exponente o reservar memoria por exponentes negativos enormes.
+        if ($exponent < -strlen($decimal) - self::MAX_DECIMALS) return 0;
+        $point = strlen($parts[2]) - (strlen($digits) - strlen($significant)) + (int) $exponent;
+        if ($point > 10 || ($point === 10 && ($significant[0] !== '1' || trim(substr($significant, 1), '0') !== ''))) {
+            throw new \InvalidArgumentException('Invalid monetary value (maximum absolute amount: 1 billion).');
+        }
+        $cut = $point + $decimals;
+        $whole = $cut > 0 ? str_pad(substr($significant, 0, $cut), $cut, '0') : '0';
+        $limit = (string) intdiv(PHP_INT_MAX, 4);
+        if (strlen($whole) > strlen($limit) || (strlen($whole) === strlen($limit) && strcmp($whole, $limit) > 0)) {
             throw new \InvalidArgumentException('Amount exceeds the supported integer range.');
         }
-        return (int) ($truncate ? ($scaled < 0 ? ceil($scaled) : floor($scaled)) : round($scaled, 0, PHP_ROUND_HALF_UP));
+        $units = (int) $whole;
+        if (!$truncate && $cut >= 0 && isset($significant[$cut]) && $significant[$cut] >= '5') $units++;
+        if ($units > intdiv(PHP_INT_MAX, 4)) throw new \InvalidArgumentException('Amount exceeds the supported integer range.');
+        return $parts[1] === '-' ? -$units : $units;
     }
 
     /** Devuelve un importe numérico desde unidades menores de una precisión conocida. */
@@ -82,9 +108,8 @@ final class Money
      *
      * Admite valores negativos en este auxiliar; son los consumidores los que
      * restringen precios, costos o bases. Rechaza no numéricos, no finitos y valores
-     * absolutos superiores a 1.000.000.000. Multiplica por scale() como float y redondea
-     * el valor escalado a seis decimales para reducir ruido de representación.
-     * Después usa mitad hacia arriba o truncamiento hacia cero; devuelve un int.
+     * absolutos superiores a 1.000.000.000. Delega en la conversión decimal de
+     * minorUnits(): HALF_UP o truncamiento hacia cero, con resultado entero.
      * No acepta strings con separadores de presentación que no sean numéricos.
      *
      * @param int|float|numeric-string $value Importe en unidades monetarias.

@@ -405,6 +405,7 @@ trait CartAdjustments
      */
     public function summary()
     {
+        $taxCatalog = FiscalCalculator::taxCatalog();
         $metadata = $this->metadata();
         $lines = $weights = $rawBases = [];
         foreach ($this->getContent() as $rowId => $item) {
@@ -443,7 +444,7 @@ trait CartAdjustments
             $applied[] = array_merge($discount, ['amount' => Money::fromMinorUnits($amount), 'cents' => $amount, 'allocations' => $allocation]);
         }
         $bases = [];
-        foreach (config('cart.taxes') as $aliquot => $tax) {
+        foreach ($taxCatalog as $aliquot => $tax) {
             $bases[$aliquot] = 0;
         }
         foreach ($lines as $line) $bases[$line['aliquot']] += $line['base'];

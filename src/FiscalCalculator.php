@@ -4,6 +4,44 @@ namespace JeleDev\Shoppingcart;
 /** Estrategias fiscales sobre filas originales o finales; sin sesión ni mutaciones. @internal */
 final class FiscalCalculator
 {
+    /**
+     * Una tasa debe ser numérica, finita y no negativa; se admiten tasas mayores de 100.
+     * Comprueba también el signo decimal de strings: un negativo diminuto puede
+     * convertirse en -0.0 por subdesbordamiento al compararlo como float.
+     */
+    public static function validateTaxRate($rate)
+    {
+        if (!is_numeric($rate) || !is_finite((float) $rate) || $rate < 0
+            || (is_string($rate) && str_starts_with(trim($rate), '-') && preg_match('/[1-9]/', preg_split('/[eE]/', $rate)[0]))) {
+            throw new \InvalidArgumentException('Invalid tax rate: tax rates must be finite, numeric and nonnegative.');
+        }
+        return $rate;
+    }
+
+    /** Valida la estructura mínima del catálogo antes de cualquier cálculo fiscal. */
+    public static function taxCatalog()
+    {
+        $catalog = config('cart.taxes');
+        if (!is_array($catalog)) throw new \InvalidArgumentException('Invalid tax configuration: cart.taxes must be an array.');
+        foreach ($catalog as $tax) {
+            if (!is_array($tax) || !isset($tax['name']) || !is_string($tax['name']) || $tax['name'] === '' || !array_key_exists('value', $tax)) {
+                throw new \InvalidArgumentException('Invalid tax configuration: each entry requires name and value.');
+            }
+            self::validateTaxRate($tax['value']);
+        }
+        return $catalog;
+    }
+
+    /** Obtiene una tasa validada sin modificar la línea ni el catálogo. */
+    public static function taxRate($aliquot)
+    {
+        $catalog = self::taxCatalog();
+        if ((!is_int($aliquot) && !is_string($aliquot)) || !array_key_exists($aliquot, $catalog)) {
+            throw new \InvalidArgumentException('Invalid aliquot.');
+        }
+        return $catalog[$aliquot]['value'];
+    }
+
     /** Conserva HKA como alternativa histórica para un driver desconocido en Cart. */
     public static function driver()
     {
@@ -24,7 +62,7 @@ final class FiscalCalculator
     {
         Money::decimals();
         $lineTaxes = [];
-        foreach (config('cart.taxes') as $aliquot => $tax) {
+        foreach (self::taxCatalog() as $aliquot => $tax) {
             $group = array_filter($lines, function ($line) use ($aliquot) {
                 return (string) $line['aliquot'] === (string) $aliquot;
             });

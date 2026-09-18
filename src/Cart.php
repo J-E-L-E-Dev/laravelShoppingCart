@@ -257,7 +257,7 @@ class Cart
             throw new \InvalidArgumentException('Unknown cost mode.');
         }
         if ($mode === self::COST_ITEM) {
-            if ($aliquot === null || !array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('ITEM costs require a configured aliquot.');
+            FiscalCalculator::taxRate($aliquot);
         } elseif ($aliquot !== null) throw new \InvalidArgumentException('Only ITEM costs have an aliquot.');
         $metadata = $this->metadata();
         $metadata['costs'][] = ['name' => $name, 'amount' => Money::fromMinorUnits($cents), 'cents' => $cents, 'mode' => $mode, 'aliquot' => $aliquot, 'description' => $description ?: $name];
