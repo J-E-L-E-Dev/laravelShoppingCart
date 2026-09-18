@@ -32,8 +32,8 @@ trait CartAdjustments
      *
      * Si la clave falta devuelve precisión y tres listas vacías. Los costos conservan importe
      * cuantizado y cents; los descuentos guardan la instrucción solicitada; solamente
-     * las observaciones manuales se almacenan en observations. No valida la estructura
-     * de datos que ya estuvieran guardados, salvo precisión y conversión monetaria.
+     * las observaciones manuales se almacenan en observations. Valida la estructura
+     * antes de convertir importes, sin liquidar fiscalmente cada operación.
      *
      * @return array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} Estado documental de la instancia.
      */
@@ -49,8 +49,26 @@ trait CartAdjustments
      * No modifica la sesión durante consultas. Al guardar una operación se materializa la
      * precisión actual. Reducir precisión aplica HALF_UP; aumentar no inventa fracciones.
      */
-    private function normalizeMetadata(array $metadata)
+    private function normalizeMetadata($metadata)
     {
+        if (!is_array($metadata)) throw new \InvalidArgumentException('Invalid cart metadata: metadata must be an array.');
+        foreach (['costs', 'discounts', 'observations'] as $key) {
+            if (!isset($metadata[$key]) || !is_array($metadata[$key])) throw new \InvalidArgumentException('Invalid cart metadata: '.$key.' must be an array.');
+        }
+        foreach ($metadata['costs'] as $cost) {
+            if (!is_array($cost) || !isset($cost['mode'], $cost['cents'], $cost['name'])
+                || !is_string($cost['mode']) || !is_string($cost['name']) || !is_int($cost['cents'])) {
+                throw new \InvalidArgumentException('Invalid cart metadata: invalid cost entry.');
+            }
+        }
+        foreach ($metadata['discounts'] as $discount) {
+            if (!is_array($discount) || !isset($discount['type'], $discount['value'])
+                || !is_string($discount['type']) || !is_numeric($discount['value'])
+                || !is_finite((float) $discount['value']) || !array_key_exists('rowId', $discount)
+                || ($discount['rowId'] !== null && !is_string($discount['rowId']) && !is_int($discount['rowId']))) {
+                throw new \InvalidArgumentException('Invalid cart metadata: invalid discount entry.');
+            }
+        }
         $from = Money::decimals($metadata['decimals'] ?? 2);
         $to = Money::decimals();
         foreach ($metadata['costs'] as &$cost) {
@@ -72,7 +90,11 @@ trait CartAdjustments
     /** Valida sobres v2/v3 y convierte los metadatos antes de restore/merge. */
     private function snapshotMetadata(array $snapshot)
     {
-        if (!in_array($snapshot['version'], [2, 3], true)) throw new \InvalidArgumentException('Unsupported cart snapshot version.');
+        if (!isset($snapshot['version']) || !in_array($snapshot['version'], [2, 3], true)) throw new \InvalidArgumentException('Unsupported cart snapshot version.');
+        if (!array_key_exists('content', $snapshot) || (!is_array($snapshot['content']) && !$snapshot['content'] instanceof Collection)) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: content must be an array or Collection.');
+        }
+        if (!isset($snapshot['metadata']) || !is_array($snapshot['metadata'])) throw new \InvalidArgumentException('Invalid cart snapshot: metadata must be an array.');
         if ($snapshot['version'] === 3 && !isset($snapshot['decimals'])) throw new \InvalidArgumentException('Snapshot precision is required.');
         $metadata = $snapshot['metadata'];
         $metadata['decimals'] = $snapshot['version'] === 2 ? 2 : Money::decimals($snapshot['decimals']);

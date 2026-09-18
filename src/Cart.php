@@ -201,13 +201,7 @@ class Cart
         $cartItem = $this->createCartItem($id, $name, $qty, $price, $aliquot, $options);
 
         $content = $this->getContent();
-        foreach ($content as $existing) {
-            if ($existing->identity() === $cartItem->identity()) { $cartItem->rowId = $existing->rowId; break; }
-        }
-
-        if ($content->has($cartItem->rowId)) {
-            $cartItem->qty += $content->get($cartItem->rowId)->qty;
-        }
+        $cartItem = $this->combineCartItem($cartItem, $content);
 
         $content->put($cartItem->rowId, $cartItem);
 
@@ -314,9 +308,12 @@ class Cart
                 break;
             }
         }
-        $content->pull($rowId);
         if ($rowId !== $cartItem->rowId) {
             if ($content->has($cartItem->rowId)) $cartItem->setQuantity($content->get($cartItem->rowId)->qty + $cartItem->qty);
+        }
+        $this->validateCartItemState($cartItem);
+        $content->pull($rowId);
+        if ($rowId !== $cartItem->rowId) {
             $this->moveDiscounts($rowId, $cartItem->rowId);
         }
         $content->put($cartItem->rowId, $cartItem);
@@ -828,6 +825,7 @@ class Cart
         // Prevalida sin getContent(): su normalización histórica puede mutar objetos de sesión.
         $metadata = $this->metadata();
         $content = $this->session->get($this->instance, new Collection);
+        $this->validateStoredCartItems($content);
         $this->validateFiscalAliquots($content, $metadata['costs']);
         $storedContent = $this->validateStoredCartItems($storedContent);
         $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
@@ -838,6 +836,7 @@ class Cart
         // Aplica sólo después de superar todas las validaciones deterministas.
         foreach ($content as $item) {
             if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
+            if (is_array($item->options)) $item->options = new CartItemOptions($item->options);
         }
         foreach ($storedContent as $cartItem) {
             $content->put($cartItem->rowId, $cartItem);
@@ -894,7 +893,17 @@ class Cart
         $storedContent = $this->validateStoredCartItems($storedContent);
         $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
         $metadata = $this->metadata();
-        $this->validateFiscalAliquots($this->session->get($this->instance, new Collection), $metadata['costs']);
+        $currentContent = $this->session->get($this->instance, new Collection);
+        $working = $this->validateStoredCartItems($currentContent);
+        $this->validateFiscalAliquots($working, $metadata['costs']);
+        foreach ($storedContent as $incoming) {
+            $combined = $this->combineCartItem($incoming, $working);
+            $working->put($combined->rowId, $combined);
+        }
+        foreach ($currentContent as $item) {
+            if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
+            if (is_array($item->options)) $item->options = new CartItemOptions($item->options);
+        }
         $identities = [];
         foreach ($storedContent as $cartItem) {
             $oldRowId = $cartItem->rowId;
@@ -930,13 +939,7 @@ class Cart
         if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
         $item->setTaxRate($item->aliquot);
         $content = $this->getContent();
-        foreach ($content as $existing) {
-            if ($existing->identity() === $item->identity()) { $item->rowId = $existing->rowId; break; }
-        }
-
-        if ($content->has($item->rowId)) {
-            $item->qty += $content->get($item->rowId)->qty;
-        }
+        $item = $this->combineCartItem($item, $content);
 
         $content->put($item->rowId, $item);
         $this->fiscalContent($content);
@@ -998,26 +1001,43 @@ class Cart
             if (!$item instanceof CartItem) {
                 throw new \InvalidArgumentException('Invalid cart snapshot: every product must be a CartItem.');
             }
-            $options = $item->options;
-            if ($options instanceof CartItemOptions) $options = $options->all();
-            if (!is_array($options)) {
-                throw new \InvalidArgumentException('Invalid cart snapshot: product options must be an array or CartItemOptions.');
-            }
-            if (!is_string($item->rowId) && !is_int($item->rowId)) {
-                throw new \InvalidArgumentException('Invalid cart snapshot: product rowId must be a string or integer.');
-            }
-            $candidate = new CartItem($item->id, $item->name, $item->price,
-                $item->aliquot ?? config('cart.default_aliquot'), $options);
-            $candidate->setQuantity($item->qty);
-            // También comprueba el importe de fila: cantidades finitas pueden desbordar qty × price.
-            Money::minorUnits($candidate->qty * $candidate->price);
-            $candidate->tax;
-            $copy = clone $item;
-            $copy->aliquot = $candidate->aliquot;
-            $copy->options = $candidate->options;
-            $validated->put($key, $copy);
+            $validated->put($key, $this->validateCartItemState($item));
         }
         return $validated;
+    }
+
+    /** Valida una línea completa sin mutarla y devuelve una copia normalizada. */
+    private function validateCartItemState(CartItem $item)
+    {
+        $options = $item->options;
+        if ($options instanceof CartItemOptions) $options = $options->all();
+        if (!is_array($options)) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: product options must be an array or CartItemOptions.');
+        }
+        if (!is_string($item->rowId) && !is_int($item->rowId)) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: product rowId must be a string or integer.');
+        }
+        $candidate = new CartItem($item->id, $item->name, $item->price,
+            $item->aliquot ?? config('cart.default_aliquot'), $options);
+        $candidate->setQuantity($item->qty);
+        // También comprueba el importe de fila: cantidades finitas pueden desbordar qty × price.
+        Money::minorUnits($candidate->qty * $candidate->price);
+        $candidate->tax;
+        $copy = clone $item;
+        $copy->aliquot = $candidate->aliquot;
+        $copy->options = $candidate->options;
+        return $copy;
+    }
+
+    /** Simula identidad y cantidad final; no escribe ni publica eventos. */
+    private function combineCartItem(CartItem $item, Collection $content)
+    {
+        $item = $this->validateCartItemState($item);
+        foreach ($content as $existing) {
+            if ($existing->identity() === $item->identity()) { $item->rowId = $existing->rowId; break; }
+        }
+        if ($content->has($item->rowId)) $item->qty += $content->get($item->rowId)->qty;
+        return $this->validateCartItemState($item);
     }
 
     /** Valida productos y costos ITEM antes de mutar sesión; conserva el default histórico para alícuotas omitidas. */

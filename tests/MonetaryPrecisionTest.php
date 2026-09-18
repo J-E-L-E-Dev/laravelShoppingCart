@@ -912,6 +912,131 @@ class MonetaryPrecisionTest extends TestCase
         $this->assertTaxSums();
     }
 
+    private function assertRejectedWithoutMutation(callable $operation): void
+    {
+        $session = serialize($this->session->all());
+        $database = serialize($this->db->table('shopping_cart')->get()->all());
+        $instance = $this->cart->currentInstance();
+        $created = $this->cart->createdAt;
+        $updated = $this->cart->updatedAt;
+        $events = [];
+        foreach (['cart.adding', 'cart.added', 'cart.updated', 'cart.merged', 'cart.restored'] as $event) {
+            $this->events->listen($event, function () use (&$events, $event) { $events[] = $event; });
+        }
+        try { $operation(); self::fail('Invalid state accepted'); }
+        catch (InvalidArgumentException $e) { self::assertNotSame('', $e->getMessage()); }
+        self::assertSame($session, serialize($this->session->all()));
+        self::assertSame($database, serialize($this->db->table('shopping_cart')->get()->all()));
+        self::assertSame($instance, $this->cart->currentInstance());
+        self::assertSame($created, $this->cart->createdAt);
+        self::assertSame($updated, $this->cart->updatedAt);
+        self::assertSame([], $events);
+    }
+
+    public static function invalidCurrentProducts(): array
+    {
+        $cases = [];
+        foreach (['restore', 'merge'] as $operation) foreach (['price' => INF, 'qty' => INF,
+            'options' => 'abc', 'id' => [], 'name' => ''] as $field => $value) $cases[] = [$operation, $field, $value];
+        return $cases;
+    }
+
+    /** @dataProvider invalidCurrentProducts */
+    public function testDestinationUsesFullProductValidation($operation, $field, $value): void
+    {
+        $this->cart->add('incoming', 'Incoming', 1, 1, 0);
+        $this->cart->store('source');
+        $this->cart->destroy();
+        $item = $this->cart->add('current', 'Current', 1, 1, 0);
+        $item->$field = $value;
+        $this->assertRejectedWithoutMutation(fn () => $this->cart->$operation('source'));
+    }
+
+    public static function accumulatedQuantities(): array
+    {
+        $cases = [];
+        foreach (['add', 'addCartItem', 'merge', 'update'] as $operation) {
+            $cases[] = [$operation, 600000000, 500000000, 1, false];
+            $cases[] = [$operation, 1e308, 1e308, 0, false];
+            $cases[] = [$operation, 600000000, 400000000, 1, true];
+            $cases[] = [$operation, 1.25, 2.5, 2, true];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider accumulatedQuantities */
+    public function testFinalAccumulatedLineIsValidatedBeforeMutation($operation, $first, $second, $price, $valid): void
+    {
+        if ($operation === 'merge') {
+            $this->cart->add('before-collision', 'First incoming', 1, 0, 0);
+            $this->cart->add('A', 'A', $second, $price, 0);
+            $this->cart->store('source');
+            $this->cart->destroy();
+        }
+        $item = $this->cart->add('A', 'A', $first, $price, 0);
+        $this->cart->addDiscountToItem($item->rowId, 'percentage', 1, 'Keep discount');
+        if ($operation === 'update') {
+            $variant = $this->cart->add('A', 'Variant', $second, $price, 0, ['variant' => 1]);
+            $this->cart->addDiscountToItem($variant->rowId, 'percentage', 2, 'Keep variant discount');
+            $run = fn () => $this->cart->update($variant->rowId, ['options' => []]);
+        } elseif ($operation === 'merge') $run = fn () => $this->cart->merge('source');
+        elseif ($operation === 'addCartItem') {
+            $incoming = new CartItem('A', 'A', $price, 0);
+            $incoming->setQuantity($second);
+            $run = fn () => $this->cart->addCartItem($incoming);
+        } else $run = fn () => $this->cart->add('A', 'A', $second, $price, 0);
+        if (!$valid) $this->assertRejectedWithoutMutation($run);
+        else {
+            $run();
+            self::assertEquals($first + $second, $this->cart->getById('A')->qty);
+            self::assertGreaterThanOrEqual(0, $this->cart->summary()['tax']);
+            $this->assertTaxSums();
+        }
+    }
+
+    public static function malformedEnvelopes(): array
+    {
+        $cases = [];
+        foreach (['restore', 'merge'] as $operation) foreach (['content', 'metadata', 'version', 'decimals',
+            'metadata.costs', 'metadata.discounts', 'metadata.observations'] as $path) {
+            $cases[] = [$operation, $path, null, true];
+            $cases[] = [$operation, $path, 'abc', false];
+        }
+        foreach (['restore', 'merge'] as $operation) {
+            foreach (['metadata.costs', 'metadata.discounts'] as $path) {
+                $cases[] = [$operation, $path, ['abc'], false];
+                $cases[] = [$operation, $path, [[]], false];
+            }
+            $cases[] = [$operation, 'version', 99, false];
+            $cases[] = [$operation, 'decimals', 5, false];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider malformedEnvelopes */
+    public function testMalformedEnvelopeFailsWithoutPhpErrorsOrMutation($operation, $path, $value, $remove): void
+    {
+        $this->cart->add('source', 'Source', 1, 1, 0);
+        $this->cart->store('source');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        if ($remove) \Illuminate\Support\Arr::forget($snapshot, $path);
+        else \Illuminate\Support\Arr::set($snapshot, $path, $value);
+        $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+        $this->cart->destroy();
+        $this->cart->add('destination', 'Destination', 1, 1, 0);
+        $this->assertRejectedWithoutMutation(fn () => $this->cart->$operation('source'));
+    }
+
+    public function testCorruptCurrentMetadataFailsBeforeRestoration(): void
+    {
+        $this->cart->add('A', 'A', 1, 1, 0);
+        $this->cart->store('source');
+        foreach (['abc', ['costs' => [], 'discounts' => 'abc', 'observations' => []]] as $metadata) {
+            $this->session->put('cart_metadata.shopping_cart', $metadata);
+            foreach (['restore', 'merge'] as $operation) $this->assertRejectedWithoutMutation(fn () => $this->cart->$operation('source'));
+        }
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();
