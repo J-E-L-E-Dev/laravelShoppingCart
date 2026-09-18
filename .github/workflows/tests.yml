@@ -50,6 +50,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Check diff
+        # Push: último commit. PR: merge de prueba frente a su primer padre (base).
+        run: git diff --check HEAD^ HEAD
 
       - name: Setup PHP
         uses: shivammathur/setup-php@v2

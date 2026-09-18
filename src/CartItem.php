@@ -8,7 +8,7 @@ use Illuminate\Contracts\Support\Jsonable;
 use Illuminate\Support\Arr;
 
 /**
- * Representa una línea original de producto y sus cálculos unitarios.
+ * Representa una línea original de producto y su impuesto de fila completa.
  *
  * El código id pertenece al consumidor; rowId identifica la línea dentro de
  * Cart y puede conservar un hash de una versión anterior. La identidad vigente
@@ -18,13 +18,15 @@ use Illuminate\Support\Arr;
  * Implementa Arrayable/Jsonable y puede asociar una clase de modelo para
  * resolverla bajo demanda mediante la propiedad virtual model.
  *
- * @property-read string $subtotal Cantidad por precio original, con dos decimales y punto.
- * @property-read string $total Cantidad por priceTax, con dos decimales y punto.
- * @property-read int|float $tax IVA unitario calculado con la tasa conservada.
- * @property-read string $taxTotal IVA unitario por cantidad, con dos decimales y punto.
+ * @property-read string $subtotal Base de fila cuantizada, con precisión configurada y punto.
+ * @property-read string $total Base de fila más tax, con precisión configurada y punto.
+ * @property-read int|float $tax IVA de fila; Cart proporciona reconciliación HKA derivada.
+ * @property-read int|float $unitTax IVA unitario independiente; no se multiplica para obtener tax.
+ * @property-read int|float $priceTax Precio unitario más unitTax, derivado de configuración vigente.
+ * @property-read string $taxTotal Alias formateado de tax; no multiplica por cantidad.
  * @property-read mixed $model Resultado de find(id) en el modelo asociado, o null.
  */
-class CartItem implements Arrayable, Jsonable
+class CartItem implements Arrayable, Jsonable, \JsonSerializable
 {
     /**
      * Identificador interno de la línea, distinto del código del producto.
@@ -72,14 +74,63 @@ class CartItem implements Arrayable, Jsonable
     public $price;
 
     /**
-     * Precio unitario original más IVA, recalculado por setTaxRate() y actualizaciones.
+     * Campo histórico de precio con IVA retenido para lectura de snapshots antiguos.
      *
-     * Es una propiedad pública almacenada, no un getter dinámico. Una asignación
-     * directa a price no la actualiza automáticamente; puede ser null en snapshots antiguos.
+     * La consulta pública ahora deriva price + unitTax mediante __get(), sin usar
+     * el impuesto de fila ni una cuantización guardada con otra configuración.
      *
      * @var int|float|null
      */
-    public $priceTax;
+    protected $priceTax;
+
+    /**
+     * Resolutores externos al estado de cada item; nunca se serializan en sesión/snapshots.
+     * @var \WeakMap<CartItem, \Closure>|null
+     */
+    private static $taxResolvers;
+
+    /** Cart inyecta el contexto fiscal temporal; el item no consulta Cart ni Session. @internal */
+    public function resolveTaxUsing(\Closure $resolver)
+    {
+        if (self::$taxResolvers === null) self::$taxResolvers = new \WeakMap();
+        self::$taxResolvers[$this] = $resolver;
+    }
+
+    /** Persistencia de atributos; excluye toda resolución fiscal temporal. */
+    public function __serialize(): array
+    {
+        $attributes = get_object_vars($this);
+        return $attributes;
+    }
+
+    /** Lee también propiedades con nombres privados de snapshots legacy y v2. */
+    public function __unserialize(array $attributes): void
+    {
+        foreach ($attributes as $key => $value) {
+            $parts = explode("\0", $key);
+            $key = end($parts);
+            if (array_key_exists($key, get_object_vars($this))) $this->$key = $value;
+        }
+    }
+
+    /** Admite el campo histórico priceTax al normalizar objetos antiguos; el getter es derivado. */
+    public function __set($name, $value)
+    {
+        if ($name === 'priceTax') { $this->priceTax = $value; return; }
+        throw new \InvalidArgumentException('Unknown CartItem property: ' . $name);
+    }
+
+    /** Conserva la consulta isset del precio unitario con IVA, ahora derivado. */
+    public function __isset($name)
+    {
+        return in_array($name, ['priceTax', 'unitTax', 'tax', 'taxTotal', 'subtotal', 'total'], true);
+    }
+
+    /** JSON directo y colecciones de Laravel comparten la misma representación fiscal. */
+    public function jsonSerialize(): array
+    {
+        return $this->toArray();
+    }
 
     /**
      * Clave de cart.taxes que define la tasa; no es el porcentaje de IVA.
@@ -135,10 +186,10 @@ class CartItem implements Arrayable, Jsonable
         if(empty($name)) {
             throw new \InvalidArgumentException('Please supply a valid name.');
         }
-        if (!is_numeric($price) || !is_finite((float) $price) || $price < 0) throw new \InvalidArgumentException('Invalid price.');
-        Money::cents($price);
+        if (!is_numeric($price) || !is_finite((float) $price) || Money::compare($price, 0) < 0) throw new \InvalidArgumentException('Invalid price.');
+        Money::minorUnits($price);
         $aliquot = $aliquot === null ? config('cart.default_aliquot') : $aliquot;
-        if (!array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('Invalid aliquot.');
+        FiscalCalculator::taxRate($aliquot);
 
         $this->id       = $id;
         $this->name     = $name;
@@ -162,22 +213,21 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Presenta la propiedad almacenada priceTax con el formato de CartItem.
+     * Presenta el precio unitario más IVA unitario con el formato de CartItem.
      *
-     * No recalcula el precio ni incorpora costos o descuentos documentales.
+     * Recalcula con la configuración vigente, sin costos ni descuentos documentales.
      *
      * @return string Precio unitario con IVA formateado.
      */
     public function priceTax()
     {
-        return $this->numberFormat($this->priceTax);
+        return $this->numberFormat($this->__get('priceTax'));
     }
 
     /**
      * Presenta cantidad por precio original de la línea, sin IVA ni ajustes.
      *
-     * La propiedad virtual subtotal primero cuantiza con number_format a dos
-     * decimales; este método aplica después el formato de presentación de CartItem.
+     * Money cuantiza con la precisión configurada; este método aplica los separadores.
      *
      * @return string Base original formateada; para la base fiscal final usar Cart::summary().
      */
@@ -187,10 +237,9 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Presenta cantidad por priceTax original, sin ajustes del documento.
+     * Presenta base original cuantizada más IVA de fila, sin ajustes del documento.
      *
-     * Utiliza el precio con IVA unitario conservado; no aplica la estrategia fiscal
-     * por fila completa o por base acumulada de Cart::summary().
+     * Utiliza tax de fila (reconciliado en HKA cuando Cart provee contexto).
      *
      * @return string Importe original con IVA, formateado.
      */
@@ -200,11 +249,11 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Presenta el IVA unitario del precio original según la tasa conservada.
+     * Presenta el IVA de la fila original según la configuración vigente.
      *
      * No es el impuesto de la liquidación final de Cart.
      *
-     * @return string IVA unitario formateado.
+     * @return string IVA de fila formateado.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public function tax()
@@ -213,10 +262,9 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Presenta IVA unitario por cantidad, sin ajustes documentales.
+     * Presenta el mismo IVA de fila que tax(), sin ajustes documentales.
      *
-     * Multiplica el impuesto unitario ya cuantizado; puede diferir del IVA de la
-     * fila completa (GENERAL) o de las bases acumuladas (HKA/PNP) en Cart::summary().
+     * No vuelve a multiplicar por cantidad. Puede diferir de summary() con ajustes.
      *
      * @return string IVA de la línea original formateado.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
@@ -306,47 +354,50 @@ class CartItem implements Arrayable, Jsonable
      *
      * Pese al nombre del parámetro, recibe una clave de catálogo, no un porcentaje.
      * Null usa cart.default_aliquot. Si cambia su representación string actualiza
-     * aliquot y rowId; después recalcula taxRate y la propiedad pública priceTax.
+     * aliquot y rowId; valida la tasa y calcula priceTax antes de modificar campos.
      * No mueve claves de sesión ni descuentos: sobre líneas de Cart usar Cart::setTax().
      *
      * @param int|string|null $taxRate Clave de la alícuota.
      * @return $this
-     * @throws \InvalidArgumentException Si la alícuota no existe o Money rechaza el impuesto.
+     * @throws \InvalidArgumentException Si la alícuota o tasa son inválidas o Money rechaza el impuesto.
      */
     public function setTaxRate($taxRate)
     {
         $aliquot = $taxRate === null ? config('cart.default_aliquot') : $taxRate;
-        if (!array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('Invalid aliquot.');
+        $rate = $this->getTaxRate($aliquot);
+        $priceTax = $this->price + self::calculateTaxes($this->price, $rate);
         if ((string) $this->aliquot !== (string) $aliquot) {
             $this->aliquot = $aliquot;
             $this->rowId = $this->identity();
         }
-        $this->taxRate = $this->getTaxRate($aliquot);
-        $this->priceTax = $this->price + $this->tax;
+        $this->taxRate = $rate;
+        $this->priceTax = $priceTax;
         return $this;
     }
 
     /**
      * Lee el porcentaje configurado de una alícuota sin asignarlo a la línea.
      *
-     * No valida la existencia: config() devuelve null si falta la clave.
+     * Exige una alícuota existente y tasa numérica, finita y no negativa.
      *
      * @param int|string $aliquot Clave de cart.taxes.
-     * @return int|float|numeric-string|null Valor configurado o null.
+     * @return int|float|numeric-string Valor configurado validado.
+     * @throws \InvalidArgumentException Si la configuración o la tasa no son válidas.
      */
     public function getTaxRate($aliquot)
     {
-        return config('cart.taxes.'.$aliquot.'.value');
+        return FiscalCalculator::taxRate($aliquot);
     }
 
     /**
      * Resuelve propiedades virtuales y permite leer propiedades declaradas no accesibles.
      *
-     * Prioriza cualquier propiedad existente. Para subtotal, total y taxTotal usa
-     * number_format con dos decimales y punto; tax calcula IVA unitario con taxRate.
+     * subtotal, total y taxTotal usan precisión configurada y punto. tax es IVA de
+     * fila: PNP parte de qty × price sin truncar la entrada; GENERAL cuantiza la base.
+     * HKA usa la reconciliación provista por Cart; sin contexto sólo calcula provisional.
      * model instancia la clase asociada y ejecuta find(id), por lo que puede consultar
      * la base de datos. No aplica descuentos ni costos documentales.
-     * priceTax es pública y almacenada: su lectura ordinaria no ejecuta este método.
+     * priceTax y unitTax son conceptos unitarios independientes del IVA de fila.
      *
      * @param string $attribute Nombre del atributo solicitado.
      * @return mixed Valor declarado, importe, modelo o null para nombres desconocidos.
@@ -354,20 +405,24 @@ class CartItem implements Arrayable, Jsonable
      */
     public function __get($attribute)
     {
+        if ($attribute === 'priceTax') {
+            return $this->price + $this->unitTax;
+        }
+        if ($attribute === 'unitTax') {
+            return self::calculateTaxes($this->price, $this->getTaxRate($this->aliquot));
+        }
         if(property_exists($this, $attribute)) {
             return $this->{$attribute};
         }
 
-        if($attribute === 'priceTax') {
-            return number_format($this->price + $this->tax, 2, '.', '');
-        }
-
         if($attribute === 'subtotal') {
-            return number_format($this->qty * $this->price, 2, '.', '');
+            $base = Money::minorUnits($this->qty * $this->price, config('cart.driver') === 'PNP');
+            return number_format(Money::fromMinorUnits($base), Money::decimals(), '.', '');
         }
 
         if($attribute === 'total') {
-            return number_format($this->qty * $this->priceTax, 2, '.', '');
+            $base = Money::minorUnits($this->qty * $this->price, config('cart.driver') === 'PNP');
+            return number_format(Money::fromMinorUnits($base + Money::minorUnits($this->tax)), Money::decimals(), '.', '');
         }
 
         if($attribute === 'aliquot') {
@@ -375,11 +430,18 @@ class CartItem implements Arrayable, Jsonable
         }
 
         if($attribute === 'tax') {
-            return self::calculateTaxes($this->price, $this->taxRate);
+            $resolver = self::$taxResolvers[$this] ?? null;
+            if ($resolver) {
+                $units = $resolver($this);
+                if ($units !== null) return Money::fromMinorUnits($units);
+            }
+            $base = $this->qty * $this->price;
+            if (config('cart.driver') !== 'PNP') $base = Money::fromMinorUnits(Money::minorUnits($base));
+            return self::calculateTaxes($base, $this->getTaxRate($this->aliquot));
         }
 
         if($attribute === 'taxTotal') {
-            return number_format($this->tax * $this->qty, 2, '.', '');
+            return number_format($this->tax, Money::decimals(), '.', '');
         }
 
         if($attribute === 'model' && isset($this->associatedModel)) {
@@ -393,20 +455,22 @@ class CartItem implements Arrayable, Jsonable
      * Calcula el IVA de una base numérica usando el driver configurado.
      *
      * Multiplica price por tax_rate / 100. GENERAL y HKA redondean la mitad hacia
-     * arriba a centavos; PNP trunca hacia cero. Un driver desconocido usa GENERAL.
-     * La tasa recibida ya es un porcentaje: este método no consulta su alícuota
-     * ni agrupa productos. Devuelve un número crudo, no un importe formateado.
+     * arriba a unidades menores; PNP trunca hacia cero. Un driver desconocido usa GENERAL.
+     * La tasa recibida debe ser numérica, finita y no negativa. Ya es un porcentaje:
+     * este método no consulta su alícuota ni agrupa productos.
+     * Devuelve un número crudo, no un importe formateado.
      * La estrategia de acumulación pertenece a Cart: GENERAL entrega la base
-     * completa de una línea fiscal; HKA y PNP entregan la base acumulada de
-     * una alícuota. El cálculo unitario de los getters no sustituye esas bases.
+     * completa de una línea fiscal; PNP entrega la entrada sin truncar de esa fila;
+     * HKA agrupa bases en FiscalCalculator. unitTax no sustituye el IVA de fila.
      *
      * @param int|float|numeric-string $price Base sin IVA, unitaria o agrupada por el llamador.
      * @param int|float|numeric-string $tax_rate Porcentaje de IVA.
-     * @return int|float Importe de IVA cuantizado a dos decimales.
+     * @return int|float Importe de IVA cuantizado a la precisión configurada.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     public static function calculateTaxes($price, $tax_rate)
     {
+        FiscalCalculator::validateTaxRate($tax_rate);
         switch (config('cart.driver')) {
             case 'GENERAL':
                 return self::generalDriver($price, $tax_rate);
@@ -427,48 +491,48 @@ class CartItem implements Arrayable, Jsonable
     }
 
     /**
-     * Calcula base por porcentaje y redondea la mitad hacia arriba mediante Money::cents().
+     * Calcula base por porcentaje y redondea la mitad hacia arriba mediante Money::minorUnits().
      *
-     * GENERAL cuantiza el importe resultante a dos decimales.
+     * GENERAL cuantiza el importe resultante a la precisión configurada.
      *
      * @param int|float|numeric-string $price Base sin IVA.
      * @param int|float|numeric-string $tax_rate Porcentaje aplicable.
-     * @return int|float IVA numérico en unidades monetarias, no centavos.
+     * @return int|float IVA numérico en unidades monetarias, no unidades menores.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     protected static function generalDriver($price, $tax_rate)
     {
-        return Money::cents($price * ($tax_rate / 100)) / 100;
+        return Money::fromMinorUnits(Money::minorUnits($price * ($tax_rate / 100)));
     }
 
     /**
-     * Calcula base por porcentaje y redondea la mitad hacia arriba mediante Money::cents().
+     * Calcula base por porcentaje y redondea la mitad hacia arriba mediante Money::minorUnits().
      *
      * HKA comparte actualmente la cuantización de GENERAL; no consulta equipos fiscales.
      *
      * @param int|float|numeric-string $price Base sin IVA.
      * @param int|float|numeric-string $tax_rate Porcentaje aplicable.
-     * @return int|float IVA numérico en unidades monetarias, no centavos.
+     * @return int|float IVA numérico en unidades monetarias, no unidades menores.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     protected static function hkaDriver($price, $tax_rate)
     {
-        return Money::cents($price * ($tax_rate / 100)) / 100;
+        return Money::fromMinorUnits(Money::minorUnits($price * ($tax_rate / 100)));
     }
 
     /**
-     * Calcula base por porcentaje y trunca hacia cero mediante Money::cents().
+     * Calcula base por porcentaje y trunca hacia cero mediante Money::minorUnits().
      *
      * PNP conserva la política de truncamiento tras normalizar el ruido binario.
      *
      * @param int|float|numeric-string $price Base sin IVA.
      * @param int|float|numeric-string $tax_rate Porcentaje aplicable.
-     * @return int|float IVA numérico en unidades monetarias, no centavos.
+     * @return int|float IVA numérico en unidades monetarias, no unidades menores.
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
      */
     protected static function pnpDriver($price, $tax_rate)
     {
-        return Money::cents($price * ($tax_rate / 100), true) / 100;
+        return Money::fromMinorUnits(Money::minorUnits($price * ($tax_rate / 100), true));
     }
 
     /**
@@ -559,7 +623,7 @@ class CartItem implements Arrayable, Jsonable
      * Exporta atributos originales y cálculos de la línea para Arrayable.
      *
      * No incluye modelo asociado, precio con IVA ni ajustes de Cart::summary().
-     * tax es IVA unitario numérico y subtotal es el string original de dos decimales.
+     * tax es IVA de fila numérico y subtotal es el string original de precisión configurada.
      *
      * @return array{rowId: string, id: int|string|float|bool, name: string, qty: int|float|numeric-string|null, price: float, aliquot: int|string|null, options: array<array-key, mixed>, tax: int|float, subtotal: string}
      * @throws \InvalidArgumentException Si el importe calculado no es finito o excede el límite de Money.
@@ -598,14 +662,14 @@ class CartItem implements Arrayable, Jsonable
     /**
      * Aplica el formato de presentación de la línea, siempre sin separador de miles.
      *
-     * Usa cart.format.decimals y decimal_point, con valores 2 y punto si son null.
+     * Usa precisión validada (2 si falta) y decimal_point (punto si es null).
      *
      * @param int|float|numeric-string|null $value Importe original o calculado a presentar.
      * @return string Valor formateado.
      */
     private function numberFormat($value)
     {
-        $decimals = is_null(config('cart.format.decimals')) ? 2 : config('cart.format.decimals');
+        $decimals = Money::decimals();
         $decimalPoint = is_null(config('cart.format.decimal_point')) ? '.' : config('cart.format.decimal_point');
         $thousandSeparator = '';
 

@@ -64,7 +64,7 @@ class FiscalDriverTest extends TestCase
         return [
             'GENERAL por fila' => ['GENERAL', [0, 0, 2, 2], 41],
             'HKA acumulado' => ['HKA', [1, 0, 1, 2], 41],
-            'PNP acumulado truncado' => ['PNP', [0, 0, 1, 1], 39],
+            'PNP truncado por fila' => ['PNP', [0, 0, 0, 0], 37],
         ];
     }
 
@@ -85,7 +85,7 @@ class FiscalDriverTest extends TestCase
         return [
             'GENERAL redondea cada base' => ['GENERAL', 4, 8, 2, 10],
             'HKA redondea antes de acumular' => ['HKA', 4, 8, 1, 9],
-            'PNP trunca antes de acumular' => ['PNP', 3, 6, 0, 6],
+            'PNP presenta base truncada e IVA por fila' => ['PNP', 3, 6, 0, 6],
         ];
     }
 
@@ -101,16 +101,15 @@ class FiscalDriverTest extends TestCase
         self::assertSame($summary['taxes'], $this->cart->totalTaxes($this->cart->content(), []));
     }
 
-    public function testPnpTruncatesTaxAfterAccumulatingRatherThanPerLine(): void
+    public function testPnpSumsTruncatedLineTaxesRatherThanTaxingGroupedBase(): void
     {
         config(['cart.driver' => 'PNP']);
         $this->cart->add('A', 'A', 1, .049, 0);
         $this->cart->add('B', 'B', 1, .049, 0);
         $this->cart->add('C', 'C', 1, .049, 0);
-        // 0.04 + 0.04 + 0.04 = 0.12; 0.12 * 16% = 0.0192 -> 0.01.
-        // Truncar IVA por fila daría 0.00; redondear el IVA acumulado daría 0.02.
+        // Cada fila: 0.049 * 16% = 0.00784 -> 0.00. No se grava la suma.
         $summary = $this->cart->summary();
-        $this->assertLiquidation($summary, [12, 0, 0, 0], [1, 0, 0, 0], 13);
+        $this->assertLiquidation($summary, [12, 0, 0, 0], [0, 0, 0, 0], 12);
         self::assertSame($summary['taxes'], $this->cart->totalTaxes($this->cart->content(), []));
     }
 
@@ -159,7 +158,7 @@ class FiscalDriverTest extends TestCase
 
     public static function itemDrivers(): array
     {
-        return [['GENERAL', 0, 9], ['HKA', 1, 10], ['PNP', 1, 10]];
+        return [['GENERAL', 0, 9], ['HKA', 1, 10], ['PNP', 0, 9]];
     }
 
     /** @dataProvider itemDrivers */

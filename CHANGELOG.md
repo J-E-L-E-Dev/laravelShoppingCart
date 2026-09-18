@@ -6,6 +6,71 @@ All notable changes to this project will be documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [3.0.0] - 2026-09-18
+
+**v3.0.0 - Fiscal Precision and Integrity**
+
+A major release because of incompatible changes to public VAT semantics, accounting precision, and discount value types. This is not a 2.x patch or minor update.
+
+### Added
+
+- `FiscalCalculator` as the central internal authority for fiscal strategies and catalog validation.
+- Configurable monetary precision from 0 to 4 decimals and v3 snapshots with explicit precision.
+- `Money::compare()` for exact decimal comparisons of numeric strings, including scientific notation; support for these values without losing digits in Money and discounts. Floats remain approximate and are normalized to 15 significant digits.
+- Semantic validation of persisted costs, discounts, and observations, shared by session metadata and snapshots.
+- Validation of `fixedUnits` through integer states reachable across successive precision changes within 0..4.
+- Atomicity coverage for `restore()` and `merge()` when product, metadata, or snapshot validation fails.
+- `git diff --check HEAD^ HEAD` checks committed Git changes.
+
+### Changed
+
+- `CartItem::tax` represents VAT for the entire row; `taxTotal` presents that same VAT. `unitTax` and `priceTax` retain per-unit semantics.
+- GENERAL quantizes the complete `qty × price` base, calculates HALF_UP VAT per row, and sums by tax category.
+- PNP calculates VAT on the complete unquantized base (`raw qty × price`), truncates per row, and sums individual taxes.
+- HKA groups quantized bases by tax category, calculates grouped HALF_UP fiscal VAT, and reconciles individual taxes within each category. Positive differences go to the highest provisional VAT; negative differences are subtracted in order without taking any row below zero. Ties use the largest base, then the lexicographically smallest rowId.
+- `cart.format.decimals` controls monetary/fiscal arithmetic and presentation, not just formatting. Quantization, allocation, and reconciliation operate in integer minor units; float inputs do not acquire arbitrary decimal precision.
+- Fixed discounts retain `fixedUnits`; `discount.value` preserves the requested `int|float|numeric-string` type and exact strings. Precision changes rescale units without reconstructing lost information from `value`.
+- V3 snapshots and metadata preserve scale. `restore()`/`merge()` validate integrity before incorporating data, and `merge()` simulates all quantity accumulations before mutating the session.
+- The catalog requires exactly keys 0, 1, 2, and 3, nonempty names unique ignoring case and surrounding whitespace, and numeric, finite, nonnegative rates.
+
+### Fixed
+
+- Incorrect rejection of legitimate `fixedUnits` after successive rounding, such as `12345 → 1235 → 124` along 4 → 3 → 2; historically impossible units remain rejected.
+- Precision loss from converting discount numeric strings to floats, and artificial boundary crossings during monetary quantization.
+- Acceptance of tiny negative numeric strings such as `-1e-9999` in prices, costs, and discounts, and percentages exactly above 100 that a float could not distinguish.
+- Invalid quantity accumulations in `add()`, `addCartItem()`, `merge()`, and identity merges in `update()`, detected before modifying products or discounts or emitting success events.
+- Acceptance of corrupt products or metadata by `restore()`/`merge()`, and partial mutations when the destination was invalid.
+- Silent omission of lines with invalid tax categories; incomplete catalogs and unknown aliquots in snapshots raise controlled exceptions.
+- Negative individual taxes during HKA reconciliation, PNP recalculation on grouped bases, and GENERAL calculations using unit VAT multiplied by quantity.
+
+### Compatibility
+
+- Laravel/Illuminate 10, 11, and 12 remain supported, with PHP 8.1 as the minimum; Laravel 11/12 require PHP >=8.2 through their dependencies.
+- Database persistence for the cart is optional. The active cart, its products, and adjustment metadata work through Laravel's configured session storage; the `shopping_cart` table is only required when using `store()`, `restore()`, or `merge()`.
+- If the application uses `SESSION_DRIVER=database`, the session table required by Laravel is separate from the package's optional `shopping_cart` table.
+- Valid legacy and v2 snapshots remain restorable; v2 retains its historical two-decimal precision, and historical rowIds are not regenerated during `restore()`.
+- V3 snapshots include explicit precision and must not be consumed by older package versions.
+- The catalog must contain exactly 0/1/2/3. Configurations removing categories or adding extra fiscal keys are no longer valid; `name` and `value` remain configurable within the stated rules.
+
+### Upgrade Notes
+
+Review 2.x integrations that calculated:
+
+```php
+// Before: this would now multiply row VAT a second time.
+$totalTax = $item->tax * $item->qty;
+// In 3.x:
+$totalTax = $item->tax;
+```
+
+`taxTotal` already corresponds to the row; do not multiply it by quantity again. Review expected GENERAL/PNP/HKA totals, configured precision, and `cart.taxes`. Use `summary()` for fiscal settlement with costs and discounts.
+
+`$discount['value']` may be a string when a numeric string was supplied: do not assume `is_float($discount['value']) === true` or require float through strict type declarations without an explicit conversion. That conversion can lose precision; retain the original value for exact monetary decisions.
+
+The `shopping_cart` table is not part of the package's mandatory installation. It is only required for explicit persistence through `store()`, `restore()`, or `merge()`. `restore()` incorporates the stored snapshot into the active session and then deletes that persisted record; `merge()` incorporates its products and metadata without consuming the snapshot, so it can be used again later.
+
+See the [2.x to 3.x upgrade guide](docs/adjustments.md#upgrading-from-2x-to-3x) before deploying.
+
 ## [2.0.1] - 2026-09-16
 
 ### Fixed

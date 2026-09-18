@@ -201,16 +201,11 @@ class Cart
         $cartItem = $this->createCartItem($id, $name, $qty, $price, $aliquot, $options);
 
         $content = $this->getContent();
-        foreach ($content as $existing) {
-            if ($existing->identity() === $cartItem->identity()) { $cartItem->rowId = $existing->rowId; break; }
-        }
-
-        if ($content->has($cartItem->rowId)) {
-            $cartItem->qty += $content->get($cartItem->rowId)->qty;
-        }
+        $cartItem = $this->combineCartItem($cartItem, $content);
 
         $content->put($cartItem->rowId, $cartItem);
 
+        $this->fiscalContent($content);
         $this->events->dispatch('cart.added', $cartItem);
 
         $this->session->put($this->instance, $content);
@@ -243,9 +238,10 @@ class Cart
      */
     public function addCost($name, $price = null, $mode = null, $aliquot = null, $description = null, $amount = null)
     {
+        if ($description !== null && !is_string($description)) throw new \InvalidArgumentException('Cost description must be a string or null.');
         if ($amount !== null && $price !== null) throw new \InvalidArgumentException('Supply amount or price, not both.');
-        $cents = Money::cents($amount !== null ? $amount : $price);
-        if (($amount !== null ? $amount : $price) < 0 || !is_string($name) || $name === '') throw new \InvalidArgumentException('A cost requires a name and nonnegative amount.');
+        $cents = Money::minorUnits($amount !== null ? $amount : $price);
+        if (Money::compare($amount !== null ? $amount : $price, 0) < 0 || !is_string($name) || $name === '') throw new \InvalidArgumentException('A cost requires a name and nonnegative amount.');
         if ($name === self::COST_TIP) {
             if ($mode !== null || $aliquot !== null) throw new \InvalidArgumentException('Tips cannot have mode or aliquot.');
             $mode = 'tip';
@@ -256,10 +252,10 @@ class Cart
             throw new \InvalidArgumentException('Unknown cost mode.');
         }
         if ($mode === self::COST_ITEM) {
-            if ($aliquot === null || !array_key_exists($aliquot, config('cart.taxes'))) throw new \InvalidArgumentException('ITEM costs require a configured aliquot.');
+            FiscalCalculator::taxRate($aliquot);
         } elseif ($aliquot !== null) throw new \InvalidArgumentException('Only ITEM costs have an aliquot.');
         $metadata = $this->metadata();
-        $metadata['costs'][] = ['name' => $name, 'amount' => $cents / 100, 'cents' => $cents, 'mode' => $mode, 'aliquot' => $aliquot, 'description' => $description ?: $name];
+        $metadata['costs'][] = ['name' => $name, 'amount' => Money::fromMinorUnits($cents), 'cents' => $cents, 'mode' => $mode, 'aliquot' => $aliquot, 'description' => $description ?: $name];
         $this->saveMetadata($metadata);
     }
 
@@ -274,7 +270,7 @@ class Cart
      */
     public function getCost($name)
     {
-        return $this->numberFormat($this->costDetails($name)->sum('cents') / 100);
+        return $this->numberFormat(Money::fromMinorUnits($this->costDetails($name)->sum('cents')));
     }
 
     /**
@@ -296,7 +292,7 @@ class Cart
      */
     public function update($rowId, $qty)
     {
-        $original = $this->get($rowId);
+        $original = $this->rawItem($rowId);
         $rowId = $original->rowId;
         $cartItem = clone $original;
         if ($qty instanceof Buyable) $cartItem->updateFromBuyable($qty);
@@ -313,12 +309,16 @@ class Cart
                 break;
             }
         }
-        $content->pull($rowId);
         if ($rowId !== $cartItem->rowId) {
             if ($content->has($cartItem->rowId)) $cartItem->setQuantity($content->get($cartItem->rowId)->qty + $cartItem->qty);
+        }
+        $this->validateCartItemState($cartItem);
+        $content->pull($rowId);
+        if ($rowId !== $cartItem->rowId) {
             $this->moveDiscounts($rowId, $cartItem->rowId);
         }
         $content->put($cartItem->rowId, $cartItem);
+        $this->fiscalContent($content);
         $this->session->put($this->instance, $content);
         $this->events->dispatch('cart.updated', $cartItem);
         return $cartItem;
@@ -337,7 +337,7 @@ class Cart
      */
     public function remove($rowId)
     {
-        $cartItem = $this->get($rowId);
+        $cartItem = $this->rawItem($rowId);
 
         $content = $this->getContent();
 
@@ -365,7 +365,7 @@ class Cart
     public function get($rowId)
     {
         $content = $this->getContent();
-        if ($content->has($rowId)) return $content->get($rowId);
+        if ($content->has($rowId)) return $this->fiscalContent()->get($rowId);
         return $this->getById($rowId);
     }
 
@@ -379,7 +379,7 @@ class Cart
     public function getByRowId($rowId)
     {
         if (!$this->getContent()->has($rowId)) throw new InvalidRowIDException("The cart does not contain rowId {$rowId}.");
-        return $this->getContent()->get($rowId);
+        return $this->fiscalContent()->get($rowId);
     }
 
     /**
@@ -398,7 +398,7 @@ class Cart
         $matches = $this->getContent()->filter(function ($item) use ($id) { return (string) $item->id === (string) $id; });
         if ($matches->count() > 1) throw new AmbiguousItemException("Product code {$id} matches multiple lines; supply rowId.");
         if ($matches->isEmpty()) throw new InvalidRowIDException("The cart does not contain product code {$id}.");
-        return $matches->first();
+        return $this->fiscalContent()->get($matches->first()->rowId);
     }
 
     /**
@@ -427,7 +427,7 @@ class Cart
      */
     public function content()
     {
-        return $this->getContent();
+        return $this->fiscalContent();
     }
 
     /**
@@ -447,7 +447,7 @@ class Cart
      *
      * Incluye bases con prorrateos y descuentos, bases ITEM e IVA según el driver, más
      * propina y recargos legacy. No se deben sumar totalCost() ni restar
-     * totalDiscount() otra vez. cart.format afecta únicamente la presentación.
+     * totalDiscount() otra vez. cart.format.decimals controla precisión y presentación.
      *
      * @return string Total final formateado.
      * @throws \DomainException Si hay bases negativas o un prorrateo positivo sin base distribuible.
@@ -492,8 +492,8 @@ class Cart
      * Devuelve el IVA de las bases finales de productos y costos ITEM.
      *
      * Incluye prorrateos y descuentos antes del impuesto; excluye propina y legacy.
-     * GENERAL suma IVA calculado por línea; HKA y PNP calculan sobre bases
-     * acumuladas. El resultado utiliza nombres y tasas de cart.taxes.
+     * GENERAL y PNP suman IVA por línea (HALF_UP y truncamiento respectivamente).
+     * HKA calcula IVA sobre bases acumuladas. Usa nombres y tasas de cart.taxes.
      * value es el importe numérico del IVA; IVA es la tasa porcentual del catálogo.
      *
      * @return array<string, array{IVA: int|float, value: int|float}> Impuestos indexados por nombre configurado.
@@ -510,7 +510,7 @@ class Cart
      *
      * Selecciona el adaptador por cart.driver; el caso desconocido usa hkaDriver().
      * GENERAL calcula IVA sobre cada fila completa y suma los importes por alícuota.
-     * HKA acumula bases redondeadas; PNP acumula bases truncadas y trunca su IVA.
+     * HKA acumula bases redondeadas; PNP trunca el IVA de cada base original sin cuantizar.
      * Conserva entradas ajenas de taxes y reemplaza las del catálogo.
      * Para IVA con ajustes usar tax().
      *
@@ -553,7 +553,7 @@ class Cart
      */
     protected function generalDriver($input, array $taxes)
     {
-        return $this->taxesForItems($input, $taxes, true);
+        return $this->taxesForItems($input, $taxes, 'GENERAL');
     }
 
     /**
@@ -568,11 +568,11 @@ class Cart
      */
     protected function hkaDriver($input, array $taxes)
     {
-        return $this->taxesForItems($input, $taxes);
+        return $this->taxesForItems($input, $taxes, 'HKA');
     }
 
     /**
-     * Acumula bases truncadas por alícuota y trunca el IVA acumulado para PNP.
+     * Trunca el IVA por fila desde qty × price y suma por alícuota para PNP.
      *
      * La configuración PNP activa el truncamiento en Money y CartItem.
      *
@@ -583,69 +583,45 @@ class Cart
      */
     protected function pnpDriver($input, array $taxes)
     {
-        return $this->taxesForItems($input, $taxes);
+        return $this->taxesForItems($input, $taxes, 'PNP');
     }
 
-    /**
-     * Convierte productos originales en bases de filas para la estrategia fiscal.
-     *
-     * Cuantiza cantidad por precio a centavos por línea; trunca solo si cart.driver
-     * es PNP. Delega el IVA por fila o por acumulación en calculateFiscalTaxes().
-     * No aplica costos ni descuentos y no altera los productos ni sus cantidades.
-     *
-     * @param Collection<array-key, CartItem>|array<array-key, CartItem> $input Líneas a agrupar.
-     * @param array<string, mixed> $taxes Entradas previas; las del catálogo se sobrescriben.
-     * @param bool $perLine True para GENERAL; false para acumular bases por alícuota.
-     * @return array<string, mixed> Resultado fiscal por nombre configurado.
-     * @throws \InvalidArgumentException Si Money rechaza un importe.
-     */
-    private function taxesForItems($input, array $taxes, $perLine = false)
+    /** Calcula impuestos originales usando una estrategia explícita. */
+    private function taxesForItems($input, array $taxes, $driver)
     {
-        $lines = [];
-        foreach ($input as $item) {
-            $lines[] = [
-                'aliquot' => $item->aliquot,
-                'base' => Money::cents($item->qty * $item->price, config('cart.driver') === 'PNP'),
-            ];
-        }
-
-        return $this->calculateFiscalTaxes($lines, $taxes, $perLine);
+        return FiscalCalculator::calculate(FiscalCalculator::originalLines($input, $driver), $driver, $taxes)['taxes'];
     }
 
-    /**
-     * Calcula IVA por línea fiscal o por base acumulada, conservando centavos.
-     *
-     * Recibe bases ya cuantizadas: productos tras los ajustes en summary(),
-     * o filas originales en totalTaxes(). Cada operación ITEM es una línea más.
-     * GENERAL cuantiza el IVA de cada base y suma esos centavos por alícuota.
-     * HKA y PNP suman primero bases y calculan el IVA una vez por alícuota;
-     * CartItem::calculateTaxes() redondea en HKA y trunca en PNP.
-     * No cambia bases, ajustes ni metadatos. Las entradas ajenas de taxes se conservan.
-     *
-     * @param array<array-key, array{aliquot: int|string, base: int}> $lines Bases fiscales en centavos.
-     * @param array<string, mixed> $taxes Entradas iniciales del resultado.
-     * @param bool $perLine True para IVA por línea; false para IVA sobre bases acumuladas.
-     * @return array<string, mixed> IVA numérico por nombre del catálogo y entradas ajenas.
-     * @throws \InvalidArgumentException Si Money rechaza un importe de IVA.
-     */
-    private function calculateFiscalTaxes(array $lines, array $taxes, $perLine)
+    /** Vincula resolución derivada sin guardar resolutores ni impuestos en los objetos de sesión. */
+    private function fiscalContent($content = null)
     {
-        $bases = [];
-        foreach ($lines as $line) $bases[$line['aliquot']][] = $line['base'];
-        foreach (config('cart.taxes') as $aliquot => $tax) {
-            $lineBases = $bases[$aliquot] ?? [];
-            $taxBases = $perLine ? $lineBases : [array_sum($lineBases)];
-            $value = 0;
-            foreach ($taxBases as $base) {
-                $value += Money::cents(CartItem::calculateTaxes($base / 100, $tax['value']));
-            }
-            $taxes[$tax['name']] = ['IVA' => $tax['value'], 'value' => $value / 100];
-        }
-        return $taxes;
+        $content = $content ?? $this->getContent();
+        $reference = \WeakReference::create($content);
+        // Referencia débil: el resolutor no prolonga la vida de la colección ni consulta Cart/Session.
+        $resolve = static function ($item) use ($reference) {
+            $items = $reference->get();
+            if ($items === null || $items->get($item->rowId) !== $item) return null;
+            $driver = FiscalCalculator::driver();
+            $result = FiscalCalculator::calculate(FiscalCalculator::originalLines($items, $driver), $driver);
+            return $result['lineTaxes'][$item->rowId] ?? null;
+        };
+        foreach ($content as $item) $item->resolveTaxUsing($resolve);
+        return $content;
+    }
+
+    /** Acceso interno sin decoración; mantiene prioridad rowId y resolución inequívoca por código. */
+    private function rawItem($identifier)
+    {
+        $content = $this->getContent();
+        if ($content->has($identifier)) return $content->get($identifier);
+        $matches = $content->filter(function ($item) use ($identifier) { return (string) $item->id === (string) $identifier; });
+        if ($matches->count() > 1) throw new AmbiguousItemException("Product code {$identifier} matches multiple lines; supply rowId.");
+        if ($matches->isEmpty()) throw new InvalidRowIDException("The cart does not contain product code {$identifier}.");
+        return $matches->first();
     }
 
     /**
-     * Cuantiza cantidad por precio a dos decimales redondeando la mitad hacia arriba.
+     * Cuantiza cantidad por precio a la precisión configurada redondeando la mitad hacia arriba.
      *
      * Auxiliar protegido conservado; el cálculo compartido actual usa Money directamente.
      *
@@ -656,11 +632,11 @@ class Cart
      */
     protected function hka($qty, $value)
     {
-        return Money::cents($qty * $value) / 100;
+        return Money::fromMinorUnits(Money::minorUnits($qty * $value));
     }
 
     /**
-     * Cuantiza cantidad por precio a dos decimales truncando hacia cero.
+     * Cuantiza cantidad por precio a la precisión configurada truncando hacia cero.
      *
      * Auxiliar protegido conservado; el cálculo compartido actual usa Money directamente.
      *
@@ -671,7 +647,7 @@ class Cart
      */
     protected function pnp($qty, $value)
     {
-        return Money::cents($qty * $value, true) / 100;
+        return Money::fromMinorUnits(Money::minorUnits($qty * $value, true));
     }
     /**
      * Presenta la base final antes de IVA, propina y recargos legacy.
@@ -698,7 +674,7 @@ class Cart
      */
     public function search(Closure $search)
     {
-        $content = $this->getContent();
+        $content = $this->fiscalContent();
 
         return $content->filter($search);
     }
@@ -722,7 +698,7 @@ class Cart
             throw new UnknownModelException("The supplied model {$model} does not exist.");
         }
 
-        $cartItem = $this->get($rowId);
+        $cartItem = $this->rawItem($rowId);
 
         $cartItem->associate($model);
 
@@ -754,7 +730,7 @@ class Cart
     /**
      * Guarda productos y metadatos de la instancia como snapshot en base de datos.
      *
-     * Serializa version=2, content y metadata (costs, discounts, observations) en la
+     * Serializa version=3, decimals, content y metadata (con su precisión) en la
      * columna content de la tabla configurada. No liquida importes ni vacía sesión.
      * Reutiliza createdAt del objeto si existe; updated_at usa la fecha actual.
      * Despacha cart.stored después de insertar.
@@ -781,7 +757,7 @@ class Cart
         $this->getConnection()->table($this->getTableName())->insert([
             'identifier' => $identifier,
             'instance'   => $instance,
-            'content'    => serialize(['version' => 2, 'content' => $content, 'metadata' => $this->metadata()]),
+            'content'    => serialize(['version' => 3, 'decimals' => Money::decimals(), 'content' => $content, 'metadata' => $this->metadata()]),
             'created_at' => $this->createdAt ?: Carbon::now(),
             'updated_at' => Carbon::now(),
         ]);
@@ -808,10 +784,15 @@ class Cart
      * Superpone un snapshot de la instancia actual y consume su registro.
      *
      * Si no existe, no realiza cambios. Acepta la Collection antigua o un sobre con
-     * version y metadata; detecta la presencia de version sin validar su número.
+     * version 2 (precisión histórica 2) o 3 (precisión explícita) y metadata.
+     * Convierte unidades menores a la precisión actual antes de combinar registros.
      * Agrega metadatos guardados después de los existentes y sobrescribe productos
      * por rowId, sin sumar cantidades ni reconciliar identidades diferentes.
      * Guarda sesión, despacha cart.restored, recupera fechas y elimina el snapshot.
+     * Prevalida destino, origen, metadatos y fechas sin mutar sesión; un fallo de
+     * validación conserva productos, metadatos, instancia, fechas y snapshot.
+     * Rechaza productos almacenados inválidos mediante validateStoredCartItems(),
+     * compartido con merge(), antes de incorporar cualquier entrada.
      * Para sustituir todo el carrito debe llamarse destroy() antes de restaurar.
      *
      * @param int|string|InstanceIdentifier $identifier Identificador del snapshot de la instancia seleccionada.
@@ -835,30 +816,42 @@ class Cart
             ->where(['identifier'=> $identifier, 'instance' => $currentInstance])->first();
 
         $storedContent = unserialize(data_get($stored, 'content'));
-
-        if (is_array($storedContent) && isset($storedContent['version'])) {
-            $metadata = $this->metadata();
-            foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $storedContent['metadata'][$key]);
-            $this->saveMetadata($metadata);
+        $versioned = is_array($storedContent) && isset($storedContent['version']);
+        $incomingMetadata = ['costs' => [], 'discounts' => [], 'observations' => []];
+        if ($versioned) {
+            $incomingMetadata = $this->snapshotMetadata($storedContent);
             $storedContent = $storedContent['content'];
         }
 
-        $this->instance(data_get($stored, 'instance'));
+        // Prevalida sin getContent(): su normalización histórica puede mutar objetos de sesión.
+        $metadata = $this->metadata();
+        $content = $this->session->get($this->instance, new Collection);
+        $this->validateStoredCartItems($content);
+        $this->validateFiscalAliquots($content, $metadata['costs']);
+        $storedContent = $this->validateStoredCartItems($storedContent);
+        $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
+        foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
+        $createdAt = Carbon::parse(data_get($stored, 'created_at'));
+        $updatedAt = Carbon::parse(data_get($stored, 'updated_at'));
 
-        $content = $this->getContent();
-
+        // Aplica sólo después de superar todas las validaciones deterministas.
+        foreach ($content as $item) {
+            if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
+            if (is_array($item->options)) $item->options = new CartItemOptions($item->options);
+        }
         foreach ($storedContent as $cartItem) {
             $content->put($cartItem->rowId, $cartItem);
         }
 
+        if ($versioned) $this->saveMetadata($metadata);
         $this->session->put($this->instance, $content);
 
         $this->events->dispatch('cart.restored');
 
         $this->instance($currentInstance);
 
-        $this->createdAt = Carbon::parse(data_get($stored, 'created_at'));
-        $this->updatedAt = Carbon::parse(data_get($stored, 'updated_at'));
+        $this->createdAt = $createdAt;
+        $this->updatedAt = $updatedAt;
 
         $this->getConnection()->table($this->getTableName())->where(['identifier' => $identifier, 'instance' => $currentInstance])->delete();
 
@@ -872,6 +865,8 @@ class Cart
      * del origen después de los actuales; remapea los descuentos de línea al rowId
      * que sobreviva. Acepta Collection antigua y sobres con version/metadata.
      * Despacha cart.merged; repetir la llamada vuelve a incorporar datos.
+     * Prevalida metadatos, alícuotas del destino y todos los atributos comerciales
+     * y fiscales de las entradas sobre copias antes de incorporar el primer producto.
      *
      * @param int|string|InstanceIdentifier $identifier Identificador del snapshot de origen.
      * @param bool $dispatchAdd Si se publican cart.adding/cart.added por producto.
@@ -893,8 +888,22 @@ class Cart
         $storedContent = unserialize($stored->content);
         $incomingMetadata = ['costs' => [], 'discounts' => [], 'observations' => []];
         if (is_array($storedContent) && isset($storedContent['version'])) {
-            $incomingMetadata = $storedContent['metadata'];
+            $incomingMetadata = $this->snapshotMetadata($storedContent);
             $storedContent = $storedContent['content'];
+        }
+        $storedContent = $this->validateStoredCartItems($storedContent);
+        $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
+        $metadata = $this->metadata();
+        $currentContent = $this->session->get($this->instance, new Collection);
+        $working = $this->validateStoredCartItems($currentContent);
+        $this->validateFiscalAliquots($working, $metadata['costs']);
+        foreach ($storedContent as $incoming) {
+            $combined = $this->combineCartItem($incoming, $working);
+            $working->put($combined->rowId, $combined);
+        }
+        foreach ($currentContent as $item) {
+            if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
+            if (is_array($item->options)) $item->options = new CartItemOptions($item->options);
         }
         $identities = [];
         foreach ($storedContent as $cartItem) {
@@ -905,7 +914,6 @@ class Cart
             if ($discount['rowId'] !== null) $discount['rowId'] = $identities[$discount['rowId']] ?? $discount['rowId'];
         }
         unset($discount);
-        $metadata = $this->metadata();
         foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
         $this->saveMetadata($metadata);
         $this->events->dispatch('cart.merged');
@@ -932,15 +940,10 @@ class Cart
         if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
         $item->setTaxRate($item->aliquot);
         $content = $this->getContent();
-        foreach ($content as $existing) {
-            if ($existing->identity() === $item->identity()) { $item->rowId = $existing->rowId; break; }
-        }
-
-        if ($content->has($item->rowId)) {
-            $item->qty += $content->get($item->rowId)->qty;
-        }
+        $item = $this->combineCartItem($item, $content);
 
         $content->put($item->rowId, $item);
+        $this->fiscalContent($content);
 
         if ($dispatchEvent) {
             $this->events->dispatch('cart.adding', $item);
@@ -983,14 +986,82 @@ class Cart
     }
 
     /**
+     * Valida todo el snapshot mediante las reglas de CartItem, sin mutar sus objetos.
+     * Devuelve copias con opciones normalizadas y alícuota legacy resuelta; conserva
+     * rowId histórico y atributos adicionales, sin compararlo con identity().
+     * @return Collection Productos preparados sólo después de validar todas las entradas.
+     * @throws \InvalidArgumentException Si el contenido o cualquier producto es inválido.
+     */
+    private function validateStoredCartItems($content)
+    {
+        if (!is_array($content) && !$content instanceof Collection) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: product content must be an array or Collection.');
+        }
+        $validated = new Collection;
+        foreach ($content as $key => $item) {
+            if (!$item instanceof CartItem) {
+                throw new \InvalidArgumentException('Invalid cart snapshot: every product must be a CartItem.');
+            }
+            $validated->put($key, $this->validateCartItemState($item));
+        }
+        return $validated;
+    }
+
+    /** Valida una línea completa sin mutarla y devuelve una copia normalizada. */
+    private function validateCartItemState(CartItem $item)
+    {
+        $options = $item->options;
+        if ($options instanceof CartItemOptions) $options = $options->all();
+        if (!is_array($options)) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: product options must be an array or CartItemOptions.');
+        }
+        if (!is_string($item->rowId) && !is_int($item->rowId)) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: product rowId must be a string or integer.');
+        }
+        $candidate = new CartItem($item->id, $item->name, $item->price,
+            $item->aliquot ?? config('cart.default_aliquot'), $options);
+        $candidate->setQuantity($item->qty);
+        // También comprueba el importe de fila: cantidades finitas pueden desbordar qty × price.
+        Money::minorUnits($candidate->qty * $candidate->price);
+        $candidate->tax;
+        $copy = clone $item;
+        $copy->aliquot = $candidate->aliquot;
+        $copy->options = $candidate->options;
+        return $copy;
+    }
+
+    /** Simula identidad y cantidad final; no escribe ni publica eventos. */
+    private function combineCartItem(CartItem $item, Collection $content)
+    {
+        $item = $this->validateCartItemState($item);
+        foreach ($content as $existing) {
+            if ($existing->identity() === $item->identity()) { $item->rowId = $existing->rowId; break; }
+        }
+        if ($content->has($item->rowId)) $item->qty += $content->get($item->rowId)->qty;
+        return $this->validateCartItemState($item);
+    }
+
+    /** Valida productos y costos ITEM antes de mutar sesión; conserva el default histórico para alícuotas omitidas. */
+    private function validateFiscalAliquots($content, array $costs = [])
+    {
+        $catalog = FiscalCalculator::taxCatalog();
+        foreach ($content as $item) {
+            FiscalCalculator::validateAliquot($item->aliquot ?? config('cart.default_aliquot'), $catalog);
+        }
+        foreach ($costs as $cost) {
+            if ($cost['mode'] === self::COST_ITEM) FiscalCalculator::validateAliquot($cost['aliquot'] ?? null, $catalog);
+        }
+    }
+
+    /**
      * Recupera la colección de sesión y normaliza campos de snapshots antiguos.
      *
-     * Si no existe devuelve una colección vacía. Sustituye alícuota nula por la
-     * predeterminada y, si priceTax es null, lo recalcula mediante setTaxRate().
-     * La normalización actúa sobre los objetos existentes y conserva su rowId.
+     * Valida todas las alícuotas antes de modificar objetos. Si no existe devuelve
+     * una colección vacía. Sustituye alícuota nula por la predeterminada sin cambiar
+     * rowId. priceTax se deriva al leerlo, incluso en snapshots antiguos.
      *
      * @return Collection<string, CartItem> Productos originales de la instancia.
-     * @throws \InvalidArgumentException Si la alícuota o el impuesto no son válidos.
+     * @throws \InvalidArgumentException Si el catálogo o una alícuota no son válidos.
      */
     protected function getContent()
     {
@@ -998,10 +1069,10 @@ class Cart
             ? $this->session->get($this->instance)
             : new Collection;
 
+        $this->validateFiscalAliquots($content);
         foreach ($content as $item) {
             // Normaliza la alícuota omitida en snapshots antiguos sin sustituir su rowId.
             if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
-            if ($item->priceTax === null) $item->setTaxRate($item->aliquot);
         }
 
         return $content;
@@ -1103,7 +1174,7 @@ class Cart
      */
     private function numberFormat($value)
     {
-        $decimals = is_null(config('cart.format.decimals')) ? 2 : config('cart.format.decimals');
+        $decimals = Money::decimals();
         $decimalPoint = is_null(config('cart.format.decimal_point')) ? '.' : config('cart.format.decimal_point');
         $thousandSeparator = is_null(config('cart.format.thousand_separator')) ? '' : config('cart.format.thousand_separator');;
 

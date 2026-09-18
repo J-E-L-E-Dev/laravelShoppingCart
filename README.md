@@ -2,25 +2,23 @@
 
 The cart now supports persistent ITEM/PRORATED costs, tips, line/document discounts,
 structured observations and safe lookup by product code. See the
-[adjustments and migration guide (Spanish)](docs/adjustments.es.md) for the complete
+[adjustments and migration guide](docs/adjustments.md) for the complete
 API, calculation order, rounding rules and compatibility changes. Use `summary()`
 for adjusted invoice bases; `content()` retains original product attributes.
 
 ### Compatibility:
-[![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
-[![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
-[![Laravel 9.x](https://img.shields.io/badge/Laravel-9.x-red.svg)](https://laravel.com/docs/9.x)
+
 [![Laravel 10.x](https://img.shields.io/badge/Laravel-10.x-red.svg)](https://laravel.com/docs/10.x)
 [![Laravel 11.x](https://img.shields.io/badge/Laravel-11.x-red.svg)](https://laravel.com/docs/11.x)
-
+[![Laravel 12.x](https://img.shields.io/badge/Laravel-12.x-red.svg)](https://laravel.com/docs/12.x)
 [![Latest Stable Version](http://poser.pugx.org/edwinylil1/laravelshoppingcart/v)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
 [![Total Downloads](http://poser.pugx.org/edwinylil1/laravelshoppingcart/downloads)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
 [![License](http://poser.pugx.org/edwinylil1/laravelshoppingcart/license)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
 
 ## Use guide:
+
 [![en](https://img.shields.io/badge/lang-en-red.svg)](https://github.com/J-E-L-E-Dev/laravelShoppingCart)
 [![es](https://img.shields.io/badge/lang-es-yellow.svg)](https://github.com/J-E-L-E-Dev/laravelShoppingCart/blob/main/README.es.md)
-
 Laravel Shopping Cart is a shopping cart package that allows handling different tax rates for products.
 
 ## Installation
@@ -28,37 +26,22 @@ Laravel Shopping Cart is a shopping cart package that allows handling different 
 We can add the dependency in our `composer.json` file:
 
 ```json
+{
     "require": {
-        "edwinylil1/laravelshoppingcart": "~2.0.0",
-    },
+        "edwinylil1/laravelshoppingcart": "^3.0"
+    }
+}
 ```
 
 or execute
 
 ```bash
-    composer require edwinylil1/laravelshoppingcart
+    composer require edwinylil1/laravelshoppingcart
 ```
 
-### Laravel <= 7.0
-If you still have Laravel version 7.0, you need to add the package's service provider and assign it an alias. To do this, open your config/app.php file
-
-```bash
-nano config/app.php
-```
-
-### Add a new line to the providers array:
-
-```bash
-JeleDev\Shoppingcart\ShoppingcartServiceProvider::class
-```
-
-And add a new line to the `aliases` array:
-
-```bash
-'Cart' => JeleDev\Shoppingcart\Facades\Cart::class,
-```
-
-Now you're ready to start using the shopping cart in your application.
+When upgrading from 2.x, review [CHANGELOG.md](CHANGELOG.md) and the
+[adjustments guide](docs/adjustments.md#upgrading-from-2x-to-3x): v3 changes
+fiscal semantics and monetary precision.
 
 ## User guide
 
@@ -76,89 +59,117 @@ You can follow the links to quickly navigate to the topic of your interest:
 
 ## Configuration
 
-The shopping cart stores information in sessions. However, you can save the cart in the database to retrieve it later.
-
-By default, the package will use the 'MySQL' database connection and utilize a table named 'shopping_cart'.
-
+The shopping cart stores its active state in Laravel's configured session storage.
+Database persistence is optional and is only required when you want to store a cart
+and retrieve or merge it later using `store()`, `restore()` or `merge()`.
+You can therefore use the cart, products, costs, discounts, observations and
+`summary()` without creating the `shopping_cart` table.
+The session storage mechanism is controlled by Laravel through `SESSION_DRIVER`
+(for example `file`, `redis` or `database`). If Laravel uses
+`SESSION_DRIVER=database`, Laravel may require its own session table; that table
+is separate from the optional `shopping_cart` table used by this package.
+When optional cart persistence is used, the package uses the configured database
+connection and the `shopping_cart` table by default.
 The package is designed to handle four tax rates for products. If the tax rate is passed as null, a default tax option is set for the products.
-
 The default tax values are as follows:
 
 ```php
-    'default_aliquot' => 0,
-    'taxes' => [
-        '0' => [
-            'name' => 'GENERAL',
-            'value' => 16.00
-        ],
-        '1' => [
-            'name' => 'EXEMPT',
-            'value' => 0.00
-        ],
-        '2' => [
-            'name' => 'REDUCED',
-            'value' => 8.00
-        ],
-        '3' => [
-            'name' => 'LUXURY',
-            'value' => 31.00
-        ]
-    ]
+    'default_aliquot' => 0,
+    'taxes' => [
+        '0' => [
+            'name' => 'GENERAL',
+            'value' => 16.00
+        ],
+        '1' => [
+            'name' => 'EXEMPT',
+            'value' => 0.00
+        ],
+        '2' => [
+            'name' => 'REDUCED',
+            'value' => 8.00
+        ],
+        '3' => [
+            'name' => 'LUXURY',
+            'value' => 31.00
+        ]
+    ]
 ```
 
-You can modify the name and value properties to your needs.
+The Venezuelan fiscal catalog requires exactly keys **0, 1, 2 and 3**:
+all four are mandatory and no additional keys are allowed.
+
+The `name` and `value` fields may be customized. Each `name` must be a string,
+nonempty after trimming, and unique ignoring case and surrounding whitespace.
+Each `value` must be numeric, finite and nonnegative. A fiscal line (product or
+ITEM cost) referencing an aliquot outside 0..3 raises `InvalidArgumentException`;
+it is never silently ignored.
 
 For Venezuela, the package supports invoice calculation for the fiscal providers 'The Factory HKA' and 'PNP Developments'
 
-There are three drivers; HKA is the default. `config('cart.driver')` controls both
-how bases and VAT are quantized and when bases are accumulated before calculating VAT.
+There are three drivers; HKA is the default. `cart.format.decimals` controls both
+presentation and monetary/fiscal precision: an integer from **0 to 4**, default **2**.
 
-| Driver | Base per product line | VAT calculation |
+All examples below use two decimals and 16% VAT.
+
+| Driver | Product base | VAT calculation |
 | --- | --- | --- |
-| GENERAL | HALF_UP to 2 decimal places | Round VAT for each final fiscal line, then sum by tax category |
-| HKA | HALF_UP to 2 decimal places | Sum final bases by tax category, then round VAT |
-| PNP | Truncate toward zero to 2 decimal places | Sum truncated bases by tax category, then truncate VAT |
+| GENERAL | HALF_UP at configured precision | HALF_UP VAT for each final fiscal line, then sum by tax category |
+| HKA | HALF_UP at configured precision | Sum bases by tax category, then HALF_UP VAT; reconcile original item taxes |
+| PNP | Truncated for subtotal; retain raw quantity × price for VAT | Truncate VAT for each fiscal line, then sum; never tax the grouped base |
 
-First quantize `quantity × price`, then add allocated PRORATED costs and subtract
-applicable line and document discounts to obtain each final product base.
-Allocations and discounts operate in cents. Each ITEM cost is another fiscal line:
-GENERAL taxes it independently; HKA and PNP include it in its tax category's
-accumulated base. ITEM amounts are already rounded to cents when registered.
-PRORATED is already included in product bases and is not added again. Tips and
-legacy costs increase the total without entering taxable bases or VAT.
+GENERAL: quantity 2 × price 10.23 gives base 20.46 and line VAT 3.2736 → **3.27**,
+not rounded unit VAT 1.64 × 2 = 3.28. Two distinct lines of 0.03 produce VAT
+0.00 + 0.00 under GENERAL, while HKA calculates `(0.03 + 0.03) × 16% → 0.01`.
 
-**GENERAL versus HKA, two separate lines of 0.03 at 16% VAT:**
+`summary()['bases']` remains grouped for all drivers: identical bases can correctly
+produce different `summary()['taxes']`. Tax names come from `cart.taxes`.
 
-```text
-GENERAL: 0.03 × 16% = 0.0048 → 0.00 for each line; VAT = 0.00
-HKA:     (0.03 + 0.03) × 16% = 0.0096 → 0.01
+PNP: two lines of 0.04 each produce `truncate(0.04 × 16%) = 0.00`, so total VAT
+is **0.00**, not grouped VAT 0.01. PNP does not truncate the input before computing
+line VAT: quantity 3 × price 0.023 gives raw base 0.069 and VAT **0.01**, while
+its displayed subtotal base is 0.06.
 
-GENERAL base = 0.06; VAT = 0.00
-HKA base     = 0.06; VAT = 0.01
-```
+**`CartItem::tax` now means VAT for the entire original line.** This applies to
+`toArray()`, `toJson()` and `json_encode(Cart::content())`. `taxTotal` formats that
+same amount; `total` is the quantized line base plus line VAT. `price` stays unit
+price; `unitTax` and `priceTax = price + unitTax` are separate unit concepts.
 
-`summary()['bases']` always contains final bases grouped by tax category for
-invoicing and queries. This does not mean GENERAL uses grouped bases to calculate
-VAT. **Identical bases with different `summary()['taxes']` are correct and expected.**
-Tax entries use names from `config('cart.taxes')`; `IVA` is the percentage and
-`value` is the tax amount.
+Do not multiply `item.tax` by quantity again.
 
-**GENERAL uses the whole line, including quantity:** for quantity 2, price 10.23
-and VAT 16%, the base is `2 × 10.23 = 20.46`; VAT is `3.2736 → 3.27`.
-Rounding unit VAT first would give `1.64 × 2 = 3.28`, which is not this strategy.
+HKA reconciles the provisional item taxes with grouped fiscal VAT, separately for
+each tax category. Example: A, quantity 3 × 0.34, has base 1.02 and provisional
+VAT 0.16; B, quantity 1 × 0.89, has provisional VAT 0.14. Grouped VAT is
+`1.91 × 16% → 0.31`, so **A.tax = 0.17 and B.tax = 0.14**.
 
-**HKA versus PNP, two separate lines of 0.039 at 16% VAT:**
+Items are ordered by largest provisional tax, largest quantized base, then
+lexicographically smallest rowId. A positive difference goes entirely to the first
+item; a negative difference is subtracted in order, stopping each item at zero. This is
+recalculated from original products, independently of document adjustments.
 
-```text
-HKA: 0.039 → 0.04 each; base = 0.08; VAT = 0.0128 → 0.01
-PNP: 0.039 → 0.03 each; base = 0.06; VAT = 0.0096 → 0.00
-```
+`content()`, `get()`, `getById()` and `getByRowId()` keep the original objects and
+supply derived fiscal context without persisting tax overrides. A standalone or
+detached CartItem has only its provisional HKA tax; fetch it through Cart to get
+reconciliation against the current collection.
 
-See the [adjustments guide (Spanish)](docs/adjustments.es.md#orden-matemático)
-for the complete calculation order. To change the driver, publish the configuration file.
+In `summary()`, PRORATED and discounts already belong to final product bases.
+PNP applies those allocated adjustments to the raw product base before truncating
+line VAT. Each ITEM cost is a separate fiscal line: GENERAL rounds its VAT, PNP
+truncates its VAT, and HKA includes its base in grouped VAT. Costs are registered
+with HALF_UP at configured precision. Tips and legacy costs do not generate VAT.
+
+Money uses integer minor units: 100 per currency unit at precision 2, 1000 at
+precision 3. Historical `cents` fields and `Money::cents()` retain their names but
+use the configured scale. `allocations` uses that same scale. Snapshots v3 and
+session metadata record precision; legacy/v2 monetary integers are interpreted
+at precision 2 and converted, so historical `cents = 123` remains **1.23**, not 0.123.
+
+Reducing precision rounds each stored operation HALF_UP.
+
+See the [adjustments and migration guide](docs/adjustments.md) for formulas,
+precision conversion and HKA reconciliation limits. To change configuration, publish it:
 
 ```bash
-    php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
+    php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
 ```
 
 ## Usage
@@ -180,7 +191,7 @@ for the complete calculation order. To change the driver, publish the configurat
 Import the class for its usage:
 
 ```
-    use Cart;
+    use Cart;
 ```
 
 You can operate the shopping cart using the following methods:
@@ -194,6 +205,7 @@ before VAT, tax category and options. Omitting the category uses
 (default keys: 0, 1, 2 and 3).
 
 **Line identity = product code/id + options + tax category.**
+
 `name`, `price` and `qty` are not part of identity. Every option participates,
 including `image`, `color`, `size`, `presentation` and `variant`; options are not
 merely display metadata.
@@ -213,6 +225,7 @@ Cart::add('P001', 'Hammer', 1, 10.00, 0, []);
 ```
 
 **Consideration:** a different price or name does not create another identity.
+
 For the same code, options and category, `add()` accumulates quantity and replaces
 the other attributes with those supplied in the new addition, including price
 and name. To edit an existing line, use `update()`.
@@ -235,7 +248,6 @@ For the cart's + button, send the new quantity:
 ```php
 $item = Cart::get($rowId);
 Cart::update($rowId, $item->qty + 1);
-
 // Alternative when P001 identifies exactly one line:
 $item = Cart::get('P001');
 Cart::update('P001', $item->qty + 1);
@@ -255,7 +267,6 @@ Cart::update($item->rowId, 2);
 This preserves the image and identity. Calling
 `Cart::add('P001', 'Hammer', 1, 10.00, 0, [])` instead would create a different
 identity: `[]` differs from `['image' => '/img/hammer.jpg']`.
-
 Pass a partial array or an object implementing `Buyable` for other changes:
 
 ```php
@@ -271,15 +282,14 @@ or less removes the line.
 
 To retrieve the contents of the cart, you will use the `content()` method. This method will return a collection of CartItems that you can iterate over and display the content to your customers
 
-
 ```php
-    Cart::content();
+    Cart::content();
 ```
 
 This method will return the content of the current cart instance, if you want the content of another instance, chain the calls.
 
 ```php
-    Cart::instance('wishlist')->content();
+    Cart::instance('wishlist')->content();
 ```
 
 ### get
@@ -305,19 +315,18 @@ $item = Cart::get($rowId);
 ```
 
 Lookup checks the exact `rowId` first, then the product code. A missing line throws
-`InvalidRowIDException`. See the [identity guide](docs/adjustments.es.md#api-pública)
+`InvalidRowIDException`. See the [identity guide](docs/adjustments.md#public-api)
 for explicit `getByRowId()` and `getById()` lookup.
 
 ### search
 
 To find an item in the cart, you can use the `search()` method.
-
 If, for example, you want to find all items with the name "tube", you can use the following code:
 
 ```php
-    $cart->search(function ($cartItem, $rowId) {
-        return $cartItem->name === 'tube';
-    });
+    $cart->search(function ($cartItem, $rowId) {
+        return $cartItem->name === 'tube';
+    });
 ```
 
 ### total
@@ -325,7 +334,7 @@ If, for example, you want to find all items with the name "tube", you can use th
 The `total()` method can be used to obtain the calculated total of all items in the cart, taking into account the price, quantity and configured driver. It also includes any additional costs.
 
 ```php
-    Cart::total();
+    Cart::total();
 ```
 
 You can set the default number format in the config file.
@@ -338,33 +347,33 @@ You can set the default number format in the config file.
 including prorated costs and discounts. It excludes tips and legacy costs.
 
 ```php
-    Cart::tax();
+    Cart::tax();
 ```
 
 Here's an example of a response with the HKA driver:
 
 ```
-    {
-        "GENERAL": {
-            "IVA": 16,
-            "value": 0
-        },
-        "CUSTOM NAME": {
-            "IVA": 0,
-            "value": 0
-        },
-        "REDUCED": {
-            "IVA": 8,
-            "value": 0
-        },
-        "LUXURY": {
-            "IVA": 31,
-            "value": 2.01
-        }
-    }
+    {
+        "GENERAL": {
+            "IVA": 16,
+            "value": 0
+        },
+        "CUSTOM NAME": {
+            "IVA": 0,
+            "value": 0
+        },
+        "REDUCED": {
+            "IVA": 8,
+            "value": 0
+        },
+        "LUXURY": {
+            "IVA": 31,
+            "value": 2.01
+        }
+    }
 ```
 
-Tax amounts are numeric; `cart.format` does not change them.
+Tax amounts are numeric; `cart.format.decimals` controls their precision. Separators only affect presentation.
 
 **If you're not using the Facade, but use dependency injection in your (for instance) Controller, you can also simply get the tax property `$cart->tax`**
 
@@ -374,7 +383,7 @@ Tax amounts are numeric; `cart.format` does not change them.
 prorated costs and discounts. It excludes VAT, tips and legacy costs.
 
 ```php
-    Cart::subtotal();
+    Cart::subtotal();
 ```
 
 You can set the default number format in the config file.
@@ -386,7 +395,7 @@ You can set the default number format in the config file.
 If you want to know how many items are in your cart, you can use the `count()` method. This method will return the total quantity of items in the cart. So, if you added 2 tubes and 1 television, it will return 3 items.
 
 ```php
-    Cart::count();
+    Cart::count();
 ```
 
 ### addCost
@@ -394,7 +403,7 @@ If you want to know how many items are in your cart, you can use the `count()` m
 If you want to add additional costs to the cart you can use the `addCost()` method. The method accepts a cost name and the price of the cost. This can be used for eg shipping or transaction costs.
 
 ```php
-    Cart::addCost($name, $price)
+    Cart::addCost($name, $price)
 ```
 
 Costs persist per cart instance, including database store/restore. The two-argument call retains the legacy surcharge without tax. Use `addCost('freight', 10, 'prorated')` or `addCost('installation', 20, 'item', 0)` for explicit treatment. `getCost()` stays formatted; `costDetails()` returns structured operations.
@@ -404,7 +413,7 @@ Costs persist per cart instance, including database store/restore. The two-argum
 Get an addition cost you added by `addCost()`. Accepts the cost name. Returns the formatted price of the cost.
 
 ```php
-    Cart::getCost($name)
+    Cart::getCost($name)
 ```
 
 ### remove
@@ -434,7 +443,7 @@ Multiple instances of the cart are supported. Here's how it works:
 You can set the current instance of the cart by calling:
 
 ```php
-    Cart::instance('Instance name');
+    Cart::instance('Instance name');
 ```
 
 From this moment, the active instance of the cart will be `Instance name`, so when you add, remove or get the content of the cart, you're work with the `Instance name` instance of the cart.
@@ -444,76 +453,127 @@ If you want to switch instances, you just call Cart::instance('New instance') ag
 So a little example:
 
 ```php
-    Cart::instance('shopping')->add('code', 'Product 1', 1, 9.99);
-
-    // Get the content of the 'shopping' cart
-    Cart::content();
-
-    Cart::instance('wishlist')->add('code', 'Product 2', 1, 19.95, 1, ['image' => 'url image']);
-
-    // Get the content of the 'wishlist' cart
-    Cart::content();
-
-    // If you want to get the content of the 'shopping' cart again
-    Cart::instance('shopping')->content();
-
-    // And the count of the 'wishlist' cart again
-    Cart::instance('wishlist')->count();
+    Cart::instance('shopping')->add('code', 'Product 1', 1, 9.99);
+    // Get the content of the 'shopping' cart
+    Cart::content();
+    Cart::instance('wishlist')->add('code', 'Product 2', 1, 19.95, 1, ['image' => 'url image']);
+    // Get the content of the 'wishlist' cart
+    Cart::content();
+    // If you want to get the content of the 'shopping' cart again
+    Cart::instance('shopping')->content();
+    // And the count of the 'wishlist' cart again
+    Cart::instance('wishlist')->count();
 ```
+
 **N.B. Keep in mind that the cart stays in the last set instance for as long as you don't set a different one during script execution.**
 
 **N.B.2 The default cart instance is called `shopping_cart`, so when you're not using instances,`Cart::content();` is the same as `Cart::instance('shopping_cart')->content()`.**
 
 ## Database
 
+> **Database persistence is optional.**
+>
+> The active cart and its adjustment metadata are stored in Laravel's session.
+> You do not need the `shopping_cart` table to use the normal cart API,
+> including products, costs, discounts, observations and `summary()`.
+>
+> The `shopping_cart` table is only required when using persisted-cart operations
+> such as `store()`, `restore()` or `merge()`.
+
 * [Config](#data-base-configuration)
-* [Storing the cart](#save-cart-to-database)
-* [Restoring the cart](#retrieve-cart-from-database)
+* [Storing the cart](#storing-the-cart)
+* [Restoring the cart](#restoring-the-cart)
+* [Merging a stored cart](#merging-a-stored-cart)
+
+| Feature | Laravel session | `shopping_cart` table |
+| --- | --- | --- |
+| Active cart | Required | Not required |
+| Products | Yes | Not required |
+| Costs and discounts | Yes | Not required |
+| Observations | Yes | Not required |
+| `summary()` / totals / taxes | Yes | Not required |
+| `store()` | Yes | Required |
+| `restore()` | Yes | Required |
+| `merge()` persisted cart | Yes | Required |
 
 ### Data base Configuration
 
-By default, the package will use the 'MySQL' database connection and utilize a table named 'shopping_cart'.
+By default, the package uses the database connection configured through `DB_CONNECTION`,
+falling back to `mysql`, and uses the `shopping_cart` table for optional cart persistence.
+
 If you wish to change these options, you will need to publish the configuration file.
 
 ```bash
-    php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
+    php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
 ```
 
 This will give you a `cart.php` config file in which you can make the changes.
 
-To make your life easy, the package also includes a ready to use `migration` which you can publish by running:
+If you want to use database persistence through `store()`, `restore()` or `merge()`,
+the package includes a ready-to-use migration:
 
 ```bash
-    php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="migrations"
+    php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="migrations"
 ```
 
-This will place a `shopping_cart` table's migration file into `database/migrations` directory. Now all you have to do is run `php artisan migrate` to migrate your database.
+This publishes the migration for the `shopping_cart` table into the `database/migrations` directory.
+
+Run the migration only when you want to enable this optional persistence feature:
+
+```bash
+php artisan migrate
+```
+
+If you only use the cart through Laravel's configured session storage,
+publishing or running the `shopping_cart` migration is not required.
 
 ### Storing the cart
+
 To store your cart instance into the database, you have to call the `store($identifier) ` method. Where `$identifier` is a random key, for instance the id or username of the user.
 
 ```php
-    Cart::store('username');
+    Cart::store('username');
 ```
 
 To store a cart instance named 'custom name'
 
 ```php
-    Cart::instance('custom name')->store('code');
+    Cart::instance('custom name')->store('code');
 ```
 
 ### Restoring the cart
-If you want to retrieve the cart from the database and restore it, all you have to do is call the  `restore($identifier)` where `$identifier` is the key you specified for the `store` method.
+
+If you want to retrieve the cart from the database and restore it, all you have to do is call the `restore($identifier)` method, where `$identifier` is the key you specified for the `store()` method.
 
 ```php
-    Cart::restore('username');
+Cart::restore('username');
 ```
 
-To restore a cart instance named 'custom name'
+To restore a cart instance named 'custom name':
 
 ```php
-    Cart::instance('custom name')->restore('code');
+Cart::instance('custom name')->restore('code');
 ```
+
+### Merging a stored cart
+
+Use `merge($identifier)` to merge a previously stored cart into the currently
+active cart.
+
+```php
+Cart::merge('username');
+```
+
+To merge a stored cart into a named cart instance:
+
+```php
+Cart::instance('custom name')->merge('code');
+```
+
+The stored cart is read from the optional `shopping_cart` persistence table and
+merged into the active Laravel session cart.
+
+Unlike `restore()`, `merge()` keeps the stored cart available for later use.
 
 ## Collections
 
@@ -522,13 +582,13 @@ On multiple instances the Cart will return to you a Collection. This is just a s
 As an example, you can quicky get the number of unique products in a cart:
 
 ```php
-    Cart::content()->count();
+    Cart::content()->count();
 ```
 
 Or you can group the content by the id of the products:
 
 ```php
-    Cart::content()->groupBy('id');
+    Cart::content()->groupBy('id');
 ```
 
 ## Models
@@ -544,50 +604,51 @@ The model can be accessed via the `model` property on the CartItem.
 Here is an example:
 
 ```php
-    // First we'll add the item to the cart.
-    $cartItem = Cart::add('code', 'Product name', 1, 9.99);
-
-    // Next we associate a model with the item.
-    Cart::associate($cartItem->rowId, 'Product');
-
-    // Or even easier, call the associate method on the CartItem!
-    $cartItem->associate('Product');
-
-    // You can even make it a one-liner
-    Cart::add('code', 'Product name', 1, 9.99)->associate('Product');
-
-    // Now, when iterating over the content of the cart, you can access the model.
-    foreach(Cart::content() as $row) {
-        echo 'You have ' . $row->qty . ' items of ' . $row->model->name . ' with description: "' . $row->model->description . '" in your cart.';
-    }
+    // First we'll add the item to the cart.
+    $cartItem = Cart::add('code', 'Product name', 1, 9.99);
+    // Next we associate a model with the item.
+    Cart::associate($cartItem->rowId, 'Product');
+    // Or even easier, call the associate method on the CartItem!
+    $cartItem->associate('Product');
+    // You can even make it a one-liner
+    Cart::add('code', 'Product name', 1, 9.99)->associate('Product');
+    // Now, when iterating over the content of the cart, you can access the model.
+    foreach(Cart::content() as $row) {
+        echo 'You have ' . $row->qty . ' items of ' . $row->model->name . ' with description: "' . $row->model->description . '" in your cart.';
+    }
 ```
 
 ## Exceptions
 
 The package will throw exceptions if something goes wrong. This makes it easier to debug your code when using the package or handle errors based on the type of exceptions. The following exceptions can be thrown:
 
-| Exception                    | Reason                                                                             |
+| Exception                    | Reason                                                                             |
 | ---------------------------- | ---------------------------------------------------------------------------------- |
 | *CartAlreadyStoredException* | When trying to store a cart that was already stored using the specified identifier |
-| *InvalidRowIDException*      | When the rowId that got passed doesn't exists in the current cart instance         |
-| *UnknownModelException*      | When you try to associate an none existing model to a CartItem.                    |
+| *InvalidRowIDException*      | When the rowId that got passed doesn't exists in the current cart instance         |
+| *UnknownModelException*      | When you try to associate an none existing model to a CartItem.                    |
+| *AmbiguousItemException*     | When a product code matches multiple cart lines; use the specific `rowId`          |
 
 ## Events
 
-The cart also has events build in. There are five events available for you to listen for:
+The cart also has built-in events. There are seven events available for you to listen for:
 
-| Event         | Fired                                    | Parameter                        |
+| Event         | Fired                                    | Parameter                        |
 | ------------- | ---------------------------------------- | -------------------------------- |
-| cart.added    | When an item was added to the cart.      | The `CartItem` that was added.   |
-| cart.updated  | When an item in the cart was updated.    | The `CartItem` that was updated. |
-| cart.removed  | When an item is removed from the cart.   | The `CartItem` that was removed. |
-| cart.stored   | When the content of a cart was stored.   | -                                |
-| cart.restored | When the content of a cart was restored. | -                                |
+| cart.added    | When an item was added to the cart.      | The `CartItem` that was added.   |
+| cart.updated  | When an item in the cart was updated.    | The `CartItem` that was updated. |
+| cart.removed  | When an item is removed from the cart.   | The `CartItem` that was removed. |
+| cart.stored   | When the content of a cart was stored.   | -                                |
+| cart.restored | When the content of a cart was restored. | -                                |
+| cart.adding   | Before a `CartItem` is added through `addCartItem()`. | The `CartItem` being added. |
+| cart.merged   | When a persisted cart is merged into the active cart. | - |
 
 ## Contributing
 
 Contributing is easy! Just fork the repo, make your changes then send a pull request on GitHub. If your PR is languishing in the queue and nothing seems to be happening, then send EVillegas an [email](mailto:devvillegas@proton.me).
 
 ## Donations
+
 #### by paypal: from devvillegas@proton.me
+
 #### by Binance pay: 359233003

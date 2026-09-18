@@ -7,11 +7,9 @@ orden matemático, precisión y cambios de compatibilidad. Usar `summary()` para
 las bases ajustadas de la factura; `content()` conserva los atributos originales.
 
 ### Compatibility:
-[![Laravel 7.x](https://img.shields.io/badge/Laravel-7.x-red.svg)](https://laravel.com/docs/7.x)
-[![Laravel 8.x](https://img.shields.io/badge/Laravel-8.x-red.svg)](https://laravel.com/docs/8.x)
-[![Laravel 9.x](https://img.shields.io/badge/Laravel-9.x-red.svg)](https://laravel.com/docs/9.x)
 [![Laravel 10.x](https://img.shields.io/badge/Laravel-10.x-red.svg)](https://laravel.com/docs/10.x)
 [![Laravel 11.x](https://img.shields.io/badge/Laravel-11.x-red.svg)](https://laravel.com/docs/11.x)
+[![Laravel 12.x](https://img.shields.io/badge/Laravel-12.x-red.svg)](https://laravel.com/docs/12.x)
 
 [![Latest Stable Version](http://poser.pugx.org/edwinylil1/laravelshoppingcart/v)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
 [![Total Downloads](http://poser.pugx.org/edwinylil1/laravelshoppingcart/downloads)](https://packagist.org/packages/edwinylil1/laravelshoppingcart)
@@ -28,9 +26,11 @@ Laravel Shopping Cart es un paquete de carrito de compras que permite manejar di
 Podemos agregar la dependencia en nuestro archivo `composer.json`:
 
 ```json
+{
     "require": {
-        "edwinylil1/laravelshoppingcart": "~2.0.0",
-    },
+        "edwinylil1/laravelshoppingcart": "^3.0"
+    }
+}
 ```
 
 o ejecutar
@@ -39,28 +39,9 @@ o ejecutar
     composer require edwinylil1/laravelshoppingcart
 ```
 
-### Laravel <= 7.0
-
-Si usa la versión 7.0 de Laravel, debe agregar el service provider del paquete y asignarle un alias. Para hacer esto, abra su archivo config/app.php
-
-
-```bash
-nano config/app.php
-```
-
-### Agregue una nueva línea a la matriz providers:
-
-```bash
-JeleDev\Shoppingcart\ShoppingcartServiceProvider::class
-```
-
-Y agregue una nueva l&iacute;nea a la matriz `aliases`:
-
-```bash
-'Cart' => JeleDev\Shoppingcart\Facades\Cart::class,
-```
-
-Ahora est&aacute;s listo para comenzar a usar el carrito de compras en tu aplicaci&oacute;n.
+Para actualizar desde 2.x, revisar [CHANGELOG.es.md](CHANGELOG.es.md) y la
+[guía de ajustes](docs/adjustments.es.md#actualización-desde-2x-a-3x): v3 cambia
+la semántica fiscal y la precisión monetaria.
 
 ## Gu&iacute;a del usuario
 
@@ -78,12 +59,24 @@ Puede seguir los enlaces para navegar r&aacute;pidamente al tema de su inter&eac
 
 ## Configuración
 
-El carrito de compras almacena informaci&oacute;n en sesiones. Sin embargo, puede guardar el carrito en la base de datos para recuperarlo m&aacute;s tarde.
+El carrito almacena su estado activo en el almacenamiento de sesión configurado por Laravel.
 
-De forma predeterminada, el paquete utilizar&aacute; la conexi&oacute;n de base de datos 'MySQL' y utilizar&aacute; una tabla llamada 'shopping_cart'.
+La persistencia en base de datos es opcional y sólo es necesaria cuando se desea
+guardar un carrito para recuperarlo o fusionarlo posteriormente mediante `store()`,
+`restore()` o `merge()`.
+
+Por lo tanto, puede utilizar el carrito, productos, costos, descuentos, observaciones
+y `summary()` sin crear la tabla `shopping_cart`.
+
+El mecanismo de almacenamiento de sesión lo controla Laravel mediante
+`SESSION_DRIVER` (por ejemplo `file`, `redis` o `database`). Si Laravel utiliza
+`SESSION_DRIVER=database`, Laravel puede requerir su propia tabla de sesiones; esa
+tabla es independiente de la tabla opcional `shopping_cart` utilizada por este paquete.
+
+Cuando se utiliza la persistencia opcional del carrito, el paquete usa de forma
+predeterminada la conexión de base de datos configurada y la tabla `shopping_cart`.
 
 El paquete est&aacute; diseñado para manejar cuatro tasas de impuestos para productos. Si la alicuota se pasa en null, se establece una alicuota predeterminada para los productos.
-
 
 Las alicuotas con sus valores de tasas por defecto son:
 
@@ -109,57 +102,72 @@ Las alicuotas con sus valores de tasas por defecto son:
     ]
 ```
 
-Puede modificar las propiedades name y value seg&uacute;n sus necesidades.
+El catálogo fiscal venezolano exige exactamente las claves **0, 1, 2 y 3**:
+son obligatorias y no se pueden eliminar ni agregar claves adicionales.
+Los campos `name` y `value` son configurables. Cada `name` debe ser un string
+no vacío tras quitar espacios exteriores y único, ignorando esos espacios y
+mayúsculas/minúsculas. Cada `value` debe ser numérico, finito y no negativo.
+Una línea fiscal (producto o costo ITEM) fuera de 0..3 provoca
+`InvalidArgumentException`; nunca se ignora silenciosamente.
 
 Para Venezuela, el paquete soporta el c&aacute;lculo de facturas para los proveedores fiscales 'The Factory HKA' y 'Desarrollos PNP'
 
-Hay tres drivers; HKA es el predeterminado. `config('cart.driver')` determina tanto
-cómo se cuantizan bases e impuestos como cuándo se acumulan las bases antes del IVA.
+Hay tres drivers; HKA es el predeterminado. `cart.format.decimals` controla tanto
+presentación como precisión monetaria/fiscal: entero entre **0 y 4**, por defecto **2**.
+Los ejemplos siguientes usan dos decimales e IVA del 16%.
 
-| Driver | Base por línea de producto | Cálculo del IVA |
+| Driver | Base del producto | Cálculo del IVA |
 | --- | --- | --- |
-| GENERAL | HALF_UP a 2 decimales | Redondea IVA por cada línea fiscal final y luego suma por alícuota |
-| HKA | HALF_UP a 2 decimales | Agrupa bases finales por alícuota y redondea su IVA |
-| PNP | Truncamiento hacia cero a 2 decimales | Agrupa bases truncadas por alícuota y trunca el IVA |
+| GENERAL | HALF_UP a la precisión configurada | HALF_UP del IVA por línea fiscal final; suma por alícuota |
+| HKA | HALF_UP a la precisión configurada | Agrupa bases por alícuota y redondea IVA HALF_UP; reconcilia impuestos individuales |
+| PNP | Truncada para subtotal; conserva cantidad × precio sin cuantizar para IVA | Trunca IVA por línea fiscal y luego suma; nunca calcula IVA sobre base agrupada |
 
-Primero se cuantiza `cantidad × precio`; después se suma el PRORATED asignado y
-se restan los descuentos de línea y generales aplicables para obtener la base
-final del producto. Repartos y descuentos operan en centavos. Cada costo ITEM es
-otra línea fiscal: GENERAL calcula su IVA individualmente; HKA y PNP lo incorporan
-a la base acumulada de su alícuota. El importe ITEM ya se redondea a centavos al
-registrarlo. PRORATED ya está incluido en las bases y no se vuelve a sumar.
-Propina y costos legacy aumentan el total sin integrar bases ni generar IVA.
+GENERAL: cantidad 2 × precio 10.23 da base 20.46 e IVA de fila 3.2736 → **3.27**,
+no IVA unitario redondeado 1.64 × 2 = 3.28. Dos líneas distintas de 0.03 producen
+IVA 0.00 + 0.00 en GENERAL; HKA calcula `(0.03 + 0.03) × 16% → 0.01`.
+`summary()['bases']` sigue agrupado para todos los drivers: bases iguales pueden
+producir distintos `summary()['taxes']`. Los nombres de impuestos vienen de `cart.taxes`.
 
-**GENERAL frente a HKA, dos líneas separadas de 0.03 con IVA del 16%:**
+PNP: dos líneas de 0.04 producen cada una `truncar(0.04 × 16%) = 0.00`; el IVA
+total es **0.00**, no el IVA agrupado 0.01. PNP no trunca la entrada antes de
+calcular IVA: cantidad 3 × precio 0.023 da base sin cuantizar 0.069 e IVA **0.01**,
+aunque la base presentada en subtotal es 0.06.
 
-```text
-GENERAL: 0.03 × 16% = 0.0048 → 0.00 por cada línea; IVA = 0.00
-HKA:     (0.03 + 0.03) × 16% = 0.0096 → 0.01
+**`CartItem::tax` ahora representa el IVA de la fila original completa.** Aplica a
+`toArray()`, `toJson()` y `json_encode(Cart::content())`. `taxTotal` formatea ese
+mismo importe; `total` es base de fila cuantizada más IVA de fila. `price` sigue
+siendo unitario; `unitTax` y `priceTax = price + unitTax` son conceptos unitarios
+separados. No volver a multiplicar `item.tax` por cantidad.
 
-Base GENERAL = 0.06; IVA = 0.00
-Base HKA     = 0.06; IVA = 0.01
-```
+HKA reconcilia los IVA provisionales con el IVA fiscal agrupado, separadamente
+por alícuota. Ejemplo: A, cantidad 3 × 0.34, tiene base 1.02 e IVA provisional
+0.16; B, cantidad 1 × 0.89, tiene IVA provisional 0.14. El IVA agrupado es
+`1.91 × 16% → 0.31`, por lo que **A.tax = 0.17 y B.tax = 0.14**.
+Se ordenan las filas por mayor IVA provisional, mayor base cuantizada y menor
+rowId lexicográfico. La diferencia positiva se suma a la primera; la negativa
+se resta en ese orden, sin bajar ninguna fila de cero. Se recalcula
+sobre productos originales, independientemente de los ajustes documentales.
 
-`summary()['bases']` siempre muestra bases finales agrupadas por alícuota para
-consulta y facturación. Esto no significa que GENERAL calcule IVA sobre esa base
-agrupada. **Bases idénticas con distintos `summary()['taxes']` son correctas y
-esperadas.** Los impuestos usan los nombres de `config('cart.taxes')`; `IVA` es
-el porcentaje y `value` es el importe del impuesto.
+`content()`, `get()`, `getById()` y `getByRowId()` conservan los objetos originales
+y proveen contexto fiscal derivado sin persistir impuestos sobrescritos. Un
+CartItem independiente o separado de la colección sólo tiene su IVA HKA provisional;
+consultarlo mediante Cart para reconciliarlo con la colección vigente.
 
-**GENERAL usa la línea completa, incluida su cantidad:** con cantidad 2, precio
-10.23 e IVA del 16%, la base es `2 × 10.23 = 20.46`; el IVA es `3.2736 → 3.27`.
-Redondear primero el IVA unitario daría `1.64 × 2 = 3.28`, que no corresponde a
-esta estrategia. La unidad fiscal es la línea completa, no cada unidad física.
+En `summary()`, PRORATED y descuentos ya integran las bases finales de productos.
+PNP aplica esos ajustes asignados a la base sin cuantizar antes de truncar el IVA
+por fila. Cada ITEM es otra línea fiscal: GENERAL redondea su IVA, PNP lo trunca
+y HKA incorpora su base al cálculo agrupado. Los costos se registran con HALF_UP
+a la precisión configurada. Propina y legacy no generan IVA.
 
-**HKA frente a PNP, dos líneas separadas de 0.039 con IVA del 16%:**
+Money utiliza unidades menores enteras: 100 por unidad monetaria con precisión 2,
+1000 con precisión 3. Los campos históricos `cents` y `Money::cents()` conservan
+el nombre pero usan la escala configurada. `allocations` usa la misma escala.
+Snapshots v3 y metadatos de sesión guardan la precisión; los enteros legacy/v2 se
+interpretan con precisión 2 y se convierten: `cents = 123` histórico sigue siendo
+**1.23**, no 0.123. Reducir precisión redondea cada operación almacenada HALF_UP.
 
-```text
-HKA: 0.039 → 0.04 cada una; base = 0.08; IVA = 0.0128 → 0.01
-PNP: 0.039 → 0.03 cada una; base = 0.06; IVA = 0.0096 → 0.00
-```
-
-Consultar la [guía de ajustes](docs/adjustments.es.md#orden-matemático) para el
-orden completo. Para cambiar el driver, publicar el archivo de configuración.
+Consultar la [guía de ajustes y migración](docs/adjustments.es.md) para fórmulas,
+conversión de precisión y límites de reconciliación HKA. Para cambiar configuración, publicarla:
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="config"
@@ -285,7 +293,6 @@ las cantidades. Una cantidad cero o negativa elimina la línea.
 
 Para recuperar el contenido del carrito, utilizar&aacute; el m&eacute;todo `content()`. Este m&eacute;todo devolver&aacute; una colecci&oacute;n de CartItems que puede iterar y mostrar el contenido a sus clientes.
 
-
 ```php
     Cart::content();
 ```
@@ -378,7 +385,7 @@ A continuaci&oacute;n se muestra un ejemplo de una respuesta con el controlador 
     }
 ```
 
-Los importes de IVA son numéricos; `cart.format` no los modifica.
+Los importes de IVA son numéricos; `cart.format.decimals` controla su precisión. Los separadores sólo afectan la presentación.
 
 **Si no est&aacute;s usando Facade, pero usas la inyecci&oacute;n de dependencia en tu (por ejemplo) Controller, tambi&eacute;n puedes simplemente obtener la propiedad de impuesto `$cart->tax`**
 
@@ -474,19 +481,44 @@ Entonces un pequeño ejemplo:
     // Y otra vez el recuento del carrito 'wishlist'
     Cart::instance('wishlist')->count();
 ```
+
 **NOTA. Tenga en cuenta que el carrito permanece en la &uacute;ltima instancia establecida mientras no establezca una diferente durante la ejecuci&oacute;n del script.**
 
 **NOTA.2 La instancia de carrito predeterminada se llama `shopping_cart`, por lo que cuando no est&aacute;s usando instancias, `Cart::content();` es lo mismo que `Cart::instance('shopping_cart')->content()`.**
 
 ## Base de datos
 
+> **La persistencia en base de datos es opcional.**
+>
+> El carrito activo y los metadatos de sus ajustes se almacenan en la sesión de Laravel.
+> No necesita la tabla `shopping_cart` para utilizar la API normal del carrito,
+> incluidos productos, costos, descuentos, observaciones y `summary()`.
+>
+> La tabla `shopping_cart` sólo es necesaria al utilizar operaciones de carritos
+> persistidos como `store()`, `restore()` o `merge()`.
+
 * [Configuración](#configuración-de-base-de-datos)
 * [Guardar el carrito](#guardar-el-carrito)
-* [Restaurando el carro](#restaurando-el-carro)
+* [Restaurar el carrito](#restaurar-el-carrito)
+* [Fusionar un carrito almacenado](#fusionar-un-carrito-almacenado)
+
+| Función | Sesión de Laravel | Tabla `shopping_cart` |
+| --- | --- | --- |
+| Carrito activo | Requerida | No requerida |
+| Productos | Sí | No requerida |
+| Costos y descuentos | Sí | No requerida |
+| Observaciones | Sí | No requerida |
+| `summary()` / totales / impuestos | Sí | No requerida |
+| `store()` | Sí | Requerida |
+| `restore()` | Sí | Requerida |
+| `merge()` de carrito persistido | Sí | Requerida |
 
 ### Configuración de base de datos
 
-De forma predeterminada, el paquete utilizar&aacute; la conexi&oacute;n de base de datos 'MySQL' y utilizar&aacute; una tabla llamada 'shopping_cart'.
+De forma predeterminada, el paquete utiliza la conexión de base de datos configurada
+mediante `DB_CONNECTION`, con `mysql` como valor alternativo, y la tabla `shopping_cart`
+para la persistencia opcional del carrito.
+
 Si desea cambiar estas opciones, deber&aacute; publicar el archivo de configuraci&oacute;n.
 
 ```bash
@@ -495,41 +527,77 @@ Si desea cambiar estas opciones, deber&aacute; publicar el archivo de configurac
 
 Esto le dar&aacute; un archivo de configuraci&oacute;n `cart.php` en el que podr&aacute; realizar los cambios.
 
-Para facilitarle la vida, el paquete tambi&eacute;n incluye una "migraci&oacute;n" lista para usar que puede publicar ejecutando:
+Si desea utilizar persistencia en base de datos mediante `store()`, `restore()` o
+`merge()`, el paquete incluye una migración lista para usar:
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="migrations"
 ```
 
-Esto colocar&aacute; el archivo de migraci&oacute;n de la tabla `shopping_cart` en el directorio `database/migrations`. Ahora todo lo que tienes que hacer es ejecutar `php artisan migrate` para migrar tu base de datos.
+Esto publica la migración de la tabla `shopping_cart` en el directorio
+`database/migrations`.
+
+Ejecute la migración únicamente cuando quiera habilitar esta función opcional de persistencia:
+
+```bash
+php artisan migrate
+```
+
+Si sólo utiliza el carrito mediante el almacenamiento de sesión configurado por Laravel,
+no necesita publicar ni ejecutar la migración de `shopping_cart`.
 
 ### Guardar el carrito
 
-Para almacenar su instancia de carrito en la base de datos, debe llamar al m&eacute;todo `store($identifier) ​​`. Donde `$identifier` es una clave aleatoria, por ejemplo, la identificaci&oacute;n o el username del usuario.
+Para almacenar una instancia del carrito en la base de datos, llame al método
+`store($identifier)`, donde `$identifier` es una clave que identifica el carrito,
+por ejemplo el id o username del usuario.
 
 ```php
-    Cart::store('username');
+Cart::store('username');
 ```
 
-Para almacenar una instancia de carrito llamada 'custom name'
+Para almacenar una instancia llamada 'custom name':
 
 ```php
-    Cart::instance('custom name')->store('code');
+Cart::instance('custom name')->store('code');
 ```
 
-### Restaurando el carro
+### Restaurar el carrito
 
-Si desea recuperar el carrito de la base de datos y restaurarlo, todo lo que tiene que hacer es llamar a `restore($identifier)` donde `$identifier` es la clave que especific&oacute; para el m&eacute;todo `store`.
+Para recuperar un carrito almacenado en la base de datos y restaurarlo, llame a
+`restore($identifier)`, donde `$identifier` es la clave especificada al utilizar
+`store()`.
 
 ```php
-    Cart::restore('username');
+Cart::restore('username');
 ```
 
-Para restaurar una instancia de carrito llamada 'custom name'
+Para restaurar una instancia llamada 'custom name':
 
 ```php
-    Cart::instance('custom name')->restore('code');
+Cart::instance('custom name')->restore('code');
 ```
+
+### Fusionar un carrito almacenado
+
+Use `merge($identifier)` para fusionar un carrito almacenado previamente con el
+carrito actualmente activo.
+
+```php
+Cart::merge('username');
+```
+
+Para fusionar un carrito almacenado con una instancia de carrito específica:
+
+```php
+Cart::instance('custom name')->merge('code');
+```
+
+El carrito almacenado se lee desde la tabla opcional de persistencia `shopping_cart`
+y se fusiona con el carrito activo de la sesión de Laravel.
+
+A diferencia de `restore()`, `merge()` mantiene disponible el carrito almacenado
+para utilizarlo posteriormente.
 
 ## Colecciones
 
@@ -587,10 +655,11 @@ El paquete generar&aacute; excepciones si algo sale mal. Esto hace que sea m&aac
 | *CartAlreadyStoredException* | Al intentar almacenar un carrito que ya estaba almacenado usando el identificador especificado |
 | *InvalidRowIDException*      | Cuando el rowId que se pas&oacute; no existe en la instancia del carrito actual                |
 | *UnknownModelException*      | Cuando intentas asociar un modelo que no existe a un CartItem                                  |
+| *AmbiguousItemException*     | Cuando un código de producto coincide con varias líneas del carrito; se debe utilizar el `rowId` específico |
 
 ## Eventos
 
-El carrito tambi&eacute;n tiene eventos integrados. Hay cinco eventos disponibles para que los escuches:
+El carrito tambi&eacute;n tiene eventos integrados. Hay siete eventos disponibles para que los escuches:
 
 | Evento        | Disparador                                                   | Par&aacute;metro                    |
 | ------------- | ------------------------------------------------------------ | ----------------------------------- |
@@ -599,6 +668,8 @@ El carrito tambi&eacute;n tiene eventos integrados. Hay cinco eventos disponible
 | cart.removed  | Cuando se elimina un art&iacute;culo del carrito.            | El `CartItem` que se removio.       |
 | cart.stored   | Cuando se almacen&oacute; el contenido de un carrito.        | -                                   |
 | cart.restored | Cuando se restaur&oacute; el contenido de un carrito.        | -                                   |
+| cart.adding   | Antes de agregar un `CartItem` mediante `addCartItem()`. | El `CartItem` que se agregará. |
+| cart.merged   | Cuando un carrito persistido se fusiona con el carrito activo. | - |
 
 ## Contribuir
 
