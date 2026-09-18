@@ -5,6 +5,53 @@ use PHPUnit\Framework\TestCase;
 
 class MoneyBoundaryTest extends TestCase
 {
+    public static function comparisons(): array
+    {
+        $cases = [
+            ['-1e-9999', 0, -1], ['1e-9999', 0, 1],
+            ['99.9999999999999999999', 100, -1],
+            ['100.0000000000000000001', 100, 1],
+            ['1.000000000000000000001e2', 100, 1],
+            ['100', 100, 0], ['100.0000000000000000000', 100, 0],
+            ['1e2', 100, 0], ['10e1', 100, 0], ['1000e-1', 100, 0],
+            ['-1.01', '-1', -1], ['-10', '-100', 1],
+            ['.001', '1e-3', 0], ['0001.0', '1', 0],
+            ['  +1.00e+2 ', '100', 0],
+            ['1e-9999999999999999999999', '10e-10000000000000000000000', 0],
+            ['1e9999999999999999999999', '10e9999999999999999999998', 0],
+            ['1e-9999999999999999999999', '1e-9999999999999999999998', -1],
+            ['9e9999999999999999999999', '1e10000000000000000000000', -1],
+            [.29, '0.29', 0], [55.865, '55.865', 0],
+            [1.23445, '1.234449999999999999', 1],
+        ];
+        foreach ([0, 0.0, '0', '-0', '+0', '-0.0', '-000.000', '-0e999', '-0.000e-9999', '-0.000e9999', '-0.000e50'] as $zero) {
+            $cases[] = [$zero, 0, 0];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider comparisons */
+    public function testExactDecimalComparison($left, $right, $expected): void
+    {
+        self::assertSame($expected, Money::compare($left, $right));
+        self::assertSame(-$expected, Money::compare($right, $left));
+        self::assertSame(0, Money::compare($left, $left));
+    }
+
+    public static function invalidComparisonOperands(): array
+    {
+        return [['abc'], [NAN], [INF], [-INF], [true], [null], [[]], [new \stdClass()]];
+    }
+
+    /** @dataProvider invalidComparisonOperands */
+    public function testComparisonRejectsInvalidOperands($value): void
+    {
+        foreach ([[$value, 0], [0, $value]] as [$left, $right]) {
+            try { Money::compare($left, $right); self::fail('Invalid operand accepted'); }
+            catch (InvalidArgumentException $e) { self::assertStringContainsString('Invalid numeric comparison', $e->getMessage()); }
+        }
+    }
+
     public static function boundaries(): array
     {
         $cases = [];

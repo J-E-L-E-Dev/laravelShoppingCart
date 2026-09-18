@@ -16,6 +16,88 @@ final class Money
     /** Máximo de decimales: escala 10000, con margen entero para reparto en PHP de 64 bits. */
     public const MAX_DECIMALS = 4;
 
+    /**
+     * Compara int, float o numeric-string: devuelve -1, 0 o 1, sin cuantizar.
+     * Strings conservan todos sus dígitos; floats usan 15 cifras significativas.
+     * Exponentes se operan como enteros decimales escritos, sin expandir ceros.
+     * @throws \InvalidArgumentException Si un operando no es numérico o es un float no finito.
+     */
+    public static function compare($left, $right)
+    {
+        [$ls, $ld, $le] = self::comparisonParts($left);
+        [$rs, $rd, $re] = self::comparisonParts($right);
+        if ($ls !== $rs) return $ls <=> $rs;
+        if ($ls === 0) return 0;
+        $order = self::compareIntegerStrings($le, $re);
+        if ($order === 0) {
+            $length = max(strlen($ld), strlen($rd));
+            $order = strcmp(str_pad($ld, $length, '0'), str_pad($rd, $length, '0')) <=> 0;
+        }
+        return $ls * $order;
+    }
+
+    /** Signo, mantisa sin ceros iniciales y posición decimal; independiente de la escala monetaria. */
+    private static function comparisonParts($value)
+    {
+        if (!is_numeric($value) || (is_float($value) && !is_finite($value))) {
+            throw new \InvalidArgumentException('Invalid numeric comparison: operands must be finite numeric values.');
+        }
+        $text = is_float($value)
+            ? str_replace(localeconv()['decimal_point'], '.', sprintf('%.15g', $value))
+            : trim((string) $value);
+        preg_match('/^([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/D', $text, $parts);
+        $digits = $parts[2].($parts[3] ?? '');
+        $significant = ltrim($digits, '0');
+        if ($significant === '') return [0, '', '0'];
+        $offset = strlen($parts[2]) - (strlen($digits) - strlen($significant));
+        return [$parts[1] === '-' ? -1 : 1, $significant,
+            self::addIntegerStrings($parts[4] ?? '0', (string) $offset)];
+    }
+
+    /** Canoniza un exponente entero sin convertirlo a int ni float. */
+    private static function canonicalIntegerString($value)
+    {
+        $digits = ltrim(ltrim($value, '+-'), '0');
+        return $digits === '' ? '0' : ($value[0] === '-' ? '-' : '').$digits;
+    }
+
+    private static function compareIntegerStrings($left, $right)
+    {
+        $ln = $left[0] === '-';
+        $rn = $right[0] === '-';
+        if ($ln !== $rn) return $ln ? -1 : 1;
+        $a = ltrim($left, '-');
+        $b = ltrim($right, '-');
+        $order = (strlen($a) <=> strlen($b)) ?: (strcmp($a, $b) <=> 0);
+        return $ln ? -$order : $order;
+    }
+
+    /** Suma con signo sobre dígitos; memoria proporcional a la longitud escrita del exponente. */
+    private static function addIntegerStrings($left, $right)
+    {
+        $left = self::canonicalIntegerString($left);
+        $right = self::canonicalIntegerString($right);
+        $negative = $left[0] === '-';
+        $sameSign = $negative === ($right[0] === '-');
+        $a = ltrim($left, '-');
+        $b = ltrim($right, '-');
+        if (!$sameSign && self::compareIntegerStrings($a, $b) < 0) {
+            [$a, $b] = [$b, $a];
+            $negative = !$negative;
+        }
+        $result = '';
+        $carry = 0;
+        for ($i = strlen($a) - 1, $j = strlen($b) - 1; $i >= 0 || $j >= 0; $i--, $j--) {
+            $x = $i >= 0 ? (int) $a[$i] : 0;
+            $y = $j >= 0 ? (int) $b[$j] : 0;
+            $digit = $sameSign ? $x + $y + $carry : $x - $y - $carry;
+            $carry = $sameSign ? intdiv($digit, 10) : ($digit < 0 ? 1 : 0);
+            $result .= (string) (($digit + 10) % 10);
+        }
+        if ($sameSign && $carry) $result .= '1';
+        return self::canonicalIntegerString(($negative ? '-' : '').strrev($result));
+    }
+
     /** Valida la precisión contable; sólo admite enteros entre 0 y 4. */
     public static function decimals($decimals = null)
     {

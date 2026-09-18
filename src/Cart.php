@@ -241,7 +241,7 @@ class Cart
         if ($description !== null && !is_string($description)) throw new \InvalidArgumentException('Cost description must be a string or null.');
         if ($amount !== null && $price !== null) throw new \InvalidArgumentException('Supply amount or price, not both.');
         $cents = Money::minorUnits($amount !== null ? $amount : $price);
-        if (($amount !== null ? $amount : $price) < 0 || !is_string($name) || $name === '') throw new \InvalidArgumentException('A cost requires a name and nonnegative amount.');
+        if (Money::compare($amount !== null ? $amount : $price, 0) < 0 || !is_string($name) || $name === '') throw new \InvalidArgumentException('A cost requires a name and nonnegative amount.');
         if ($name === self::COST_TIP) {
             if ($mode !== null || $aliquot !== null) throw new \InvalidArgumentException('Tips cannot have mode or aliquot.');
             $mode = 'tip';

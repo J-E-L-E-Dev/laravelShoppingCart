@@ -100,8 +100,8 @@ trait CartAdjustments
     {
         if (!is_array($discount) || !isset($discount['type'], $discount['value'], $discount['concept'])
             || !in_array($discount['type'], ['percentage', 'fixed'], true)
-            || !is_numeric($discount['value']) || !is_finite((float) $discount['value']) || $discount['value'] < 0
-            || ($discount['type'] === 'percentage' && $discount['value'] > 100)
+            || !is_numeric($discount['value']) || !is_finite((float) $discount['value']) || Money::compare($discount['value'], 0) < 0
+            || ($discount['type'] === 'percentage' && Money::compare($discount['value'], 100) > 0)
             || !is_string($discount['concept']) || !array_key_exists('rowId', $discount)
             || ($discount['rowId'] !== null && !is_string($discount['rowId']) && !is_int($discount['rowId']))) {
             throw new \InvalidArgumentException('Invalid cart metadata: invalid discount entry.');
@@ -308,7 +308,7 @@ trait CartAdjustments
         if (!is_null($concept) && !is_scalar($concept) && !$concept instanceof \Stringable) {
             throw new \InvalidArgumentException('Discount concept must be convertible to a string.');
         }
-        if (!in_array($type, ['percentage', 'fixed'], true) || !is_numeric($value) || !is_finite((float) $value) || $value < 0 || ($type === 'percentage' && $value > 100)) {
+        if (!in_array($type, ['percentage', 'fixed'], true) || !is_numeric($value) || !is_finite((float) $value) || Money::compare($value, 0) < 0 || ($type === 'percentage' && Money::compare($value, 100) > 0)) {
             throw new \InvalidArgumentException('Discount must be nonnegative: percentage (0–100) or fixed.');
         }
         $units = Money::minorUnits($value);

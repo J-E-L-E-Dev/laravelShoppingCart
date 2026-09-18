@@ -1051,6 +1051,9 @@ class MonetaryPrecisionTest extends TestCase
             $cases['cost mode relation '.$key] = ['costs', array_replace($cost, $override)];
         }
         $discount = ['rowId' => null, 'type' => 'percentage', 'value' => 5, 'concept' => 'Discount'];
+        $cases['exact percentage above 100'] = ['discounts', array_replace($discount, ['value' => '100.0000000000000000001'])];
+        $cases['exact negative percentage'] = ['discounts', array_replace($discount, ['value' => '-1e-9999'])];
+        $cases['exact negative fixed'] = ['discounts', array_replace($discount, ['type' => 'fixed', 'value' => '-1e-9999'])];
         foreach (['type' => ['unknown', '', null], 'value' => [-10, -1, -.01, 100.01, 150, INF, -INF, NAN, 'abc'],
             'concept' => [[], new \stdClass(), null], 'rowId' => [[], new \stdClass(), true]] as $field => $values) {
             foreach ($values as $key => $value) $cases['discount '.$field.' '.$key] = ['discounts', array_replace($discount, [$field => $value])];
@@ -1315,6 +1318,46 @@ class MonetaryPrecisionTest extends TestCase
             self::assertSame($expected, $discount['fixedUnits']);
             self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
         }
+    }
+
+    public function testExactNegativeAndPercentageBoundsRejectPublicWrites(): void
+    {
+        $this->cart->add('existing', 'Existing', 1, 100, 0);
+        foreach ([
+            fn () => $this->cart->add('A', 'A', 1, '-1e-9999', 0),
+            fn () => $this->cart->addCost('freight', '-1e-9999'),
+            fn () => $this->cart->addCost('freight', amount: '-1e-9999'),
+            fn () => $this->cart->addDiscount('fixed', '-1e-9999', 'Invalid'),
+            fn () => $this->cart->addDiscount('percentage', '-1e-9999', 'Invalid'),
+            fn () => $this->cart->addDiscount('percentage', '100.0000000000000000001', 'Invalid'),
+            fn () => $this->cart->addDiscountToItem('existing', 'percentage', '100.0000000000000000001', 'Invalid'),
+        ] as $operation) $this->assertRejectedWithoutMutation($operation);
+    }
+
+    public function testExactSignedZerosRemainValidForPriceCostsAndDiscounts(): void
+    {
+        foreach (['0', '-0', '+0', '0.000', '-0.000e50'] as $index => $zero) {
+            $this->cart->add('zero'.$index, 'Zero', 1, $zero, 0);
+            $this->cart->addCost('zero', $zero);
+            $this->cart->addDiscount('fixed', $zero, 'Zero');
+            $this->cart->addDiscount('percentage', $zero, 'Zero');
+        }
+        self::assertEquals(0, $this->cart->summary()['total']);
+        self::assertCount(10, $this->cart->summary()['discounts']);
+    }
+
+    public static function exactValidPercentages(): array
+    {
+        return [['0'], ['-0'], ['99.9999999999999999999'], ['100'], ['100.0'], ['100.0000000000000000000'], ['1e2']];
+    }
+
+    /** @dataProvider exactValidPercentages */
+    public function testExactPercentageBoundariesRemainValid($value): void
+    {
+        $this->cart->add('A', 'A', 1, 100, 0);
+        $this->cart->addDiscount('percentage', $value, 'Valid');
+        self::assertSame($value, $this->cart->summary()['discounts'][0]['value']);
+        self::assertGreaterThanOrEqual(0, $this->cart->summary()['total']);
     }
 
     private function assertTaxSums(): void

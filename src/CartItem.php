@@ -186,7 +186,7 @@ class CartItem implements Arrayable, Jsonable, \JsonSerializable
         if(empty($name)) {
             throw new \InvalidArgumentException('Please supply a valid name.');
         }
-        if (!is_numeric($price) || !is_finite((float) $price) || $price < 0) throw new \InvalidArgumentException('Invalid price.');
+        if (!is_numeric($price) || !is_finite((float) $price) || Money::compare($price, 0) < 0) throw new \InvalidArgumentException('Invalid price.');
         Money::minorUnits($price);
         $aliquot = $aliquot === null ? config('cart.default_aliquot') : $aliquot;
         FiscalCalculator::taxRate($aliquot);
