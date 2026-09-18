@@ -659,7 +659,7 @@ El paquete generar&aacute; excepciones si algo sale mal. Esto hace que sea m&aac
 
 ## Eventos
 
-El carrito tambi&eacute;n tiene eventos integrados. Hay cinco eventos disponibles para que los escuches:
+El carrito tambi&eacute;n tiene eventos integrados. Hay siete eventos disponibles para que los escuches:
 
 | Evento        | Disparador                                                   | Par&aacute;metro                    |
 | ------------- | ------------------------------------------------------------ | ----------------------------------- |

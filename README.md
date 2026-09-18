@@ -631,7 +631,7 @@ The package will throw exceptions if something goes wrong. This makes it easier 
 
 ## Events
 
-The cart also has events build in. There are five events available for you to listen for:
+The cart also has built-in events. There are seven events available for you to listen for:
 
 | Event         | Fired                                    | Parameter                        |
 | ------------- | ---------------------------------------- | -------------------------------- |
