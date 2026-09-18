@@ -1148,6 +1148,65 @@ class MonetaryPrecisionTest extends TestCase
         self::assertSame(['cost', 'cost', 'Valid'], array_column($this->cart->costs()->all(), 'description'));
     }
 
+    public static function historicalFixedUnits(): array
+    {
+        $cases = [];
+        foreach (range(0, 4) as $origin) foreach (range(0, 4) as $stored) {
+            foreach ([.125, .005, 1.2345, 10, .004, 0, 1] as $value) {
+                $cases[$origin.' to '.$stored.' value '.$value] = [$origin, $stored, $value];
+            }
+        }
+        return $cases;
+    }
+
+    /** @dataProvider historicalFixedUnits */
+    public function testAllHistoricalFixedQuantizationsAreAccepted($origin, $stored, $value): void
+    {
+        config(['cart.format.decimals' => $stored]);
+        $this->cart->add('A', 'A', 1, 100, 0);
+        $units = Money::rescale(Money::minorUnits($value, false, $origin), $origin, $stored);
+        $metadata = ['decimals' => $stored, 'costs' => [], 'observations' => [], 'discounts' => [
+            ['rowId' => null, 'type' => 'fixed', 'value' => $value, 'fixedUnits' => $units, 'concept' => 'Historical'],
+        ]];
+        $this->session->put('cart_metadata.shopping_cart', $metadata);
+        $before = serialize($this->session->all());
+        self::assertSame($units, $this->cart->summary()['discounts'][0]['cents']);
+        self::assertSame($before, serialize($this->session->all()));
+    }
+
+    public static function inconsistentFixedUnits(): array
+    {
+        // Para value=5 ninguna precisión 0..4 puede cuantizar el importe a cero.
+        return [[.01, 100000, 2], [.125, 999, 3], [5, 0, 2]];
+    }
+
+    /** @dataProvider inconsistentFixedUnits */
+    public function testInventedFixedUnitsAreRejectedAtomically($value, $units, $stored): void
+    {
+        config(['cart.format.decimals' => $stored]);
+        $this->cart->add('source', 'Source', 1, 100, 0);
+        $this->cart->addDiscount('fixed', $value, 'Requested');
+        $this->cart->store('source');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        $snapshot['metadata']['discounts'][0]['fixedUnits'] = $units;
+        $this->cart->destroy();
+        $this->cart->add('current', 'Current', 1, 10, 0);
+        $this->cart->addObservation('Current note');
+        $this->cart->createdAt = new \Carbon\Carbon('2020-01-01');
+        $this->cart->updatedAt = new \Carbon\Carbon('2020-02-01');
+        $current = $this->session->get('cart_metadata.shopping_cart');
+        $this->session->put('cart_metadata.shopping_cart', $snapshot['metadata']);
+        $this->assertRejectedWithoutMutation(fn () => $this->cart->summary());
+        $this->session->put('cart_metadata.shopping_cart', $current);
+        foreach ($stored === 2 ? [2, 3] : [3] as $version) {
+            $snapshot['version'] = $version;
+            $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+            foreach (['restore', 'merge'] as $operation) {
+                $this->assertRejectedWithoutMutation(fn () => $this->cart->$operation('source'));
+            }
+        }
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();

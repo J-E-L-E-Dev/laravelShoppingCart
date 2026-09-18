@@ -113,8 +113,19 @@ trait CartAdjustments
                     throw new \InvalidArgumentException('Invalid cart metadata: fixedUnits must be a nonnegative integer.');
                 }
                 Money::rescale($discount['fixedUnits'], $from, $to);
+                $this->validateFixedUnitsConsistency($discount['value'], $discount['fixedUnits'], $from);
             }
         }
+    }
+
+    /** Acepta únicamente unidades reproducibles desde alguna precisión histórica soportada. */
+    private function validateFixedUnitsConsistency($value, $fixedUnits, $storedDecimals)
+    {
+        for ($originDecimals = 0; $originDecimals <= Money::MAX_DECIMALS; $originDecimals++) {
+            $originUnits = Money::minorUnits($value, false, $originDecimals);
+            if (Money::rescale($originUnits, $originDecimals, $storedDecimals) === $fixedUnits) return;
+        }
+        throw new \InvalidArgumentException('Invalid cart metadata: fixedUnits is inconsistent with value and supported historical precision.');
     }
 
     /** Sólo las observaciones manuales se persisten; las automáticas se derivan al consultar. */
