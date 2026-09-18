@@ -46,7 +46,9 @@ Versión mayor por cambios incompatibles en la semántica pública del IVA, la p
 ### Compatibilidad
 
 - Se mantienen Laravel/Illuminate 10, 11 y 12 y PHP mínimo 8.1; Laravel 11/12 requieren PHP >=8.2 según sus dependencias.
-- No hay migración obligatoria de base de datos. Los snapshots legacy y v2 válidos siguen pudiendo restaurarse; v2 conserva su precisión histórica de dos decimales y los rowId históricos no se regeneran durante restore.
+- La persistencia del carrito en base de datos es opcional. El carrito activo, sus productos y los metadatos de ajustes funcionan mediante la sesión configurada de Laravel; la tabla `shopping_cart` sólo es necesaria al utilizar `store()`, `restore()` o `merge()`.
+- Si la aplicación utiliza `SESSION_DRIVER=database`, la tabla de sesiones requerida por Laravel es independiente de la tabla opcional `shopping_cart` del paquete.
+- Los snapshots legacy y v2 válidos siguen pudiendo restaurarse; v2 conserva su precisión histórica de dos decimales y los rowId históricos no se regeneran durante `restore()`.
 - Los snapshots v3 incorporan precisión explícita y no deben ser consumidos por versiones antiguas del paquete.
 - El catálogo debe contener exactamente 0/1/2/3. Configuraciones que eliminen categorías o agreguen claves fiscales adicionales ya no son válidas; `name` y `value` siguen siendo configurables dentro de las reglas indicadas.
 
@@ -64,6 +66,8 @@ $totalTax = $item->tax;
 `taxTotal` ya corresponde a la fila; no volver a multiplicarlo por cantidad. Revisar los totales esperados GENERAL/PNP/HKA, la precisión configurada y `cart.taxes`. Usar `summary()` para liquidación fiscal con costos y descuentos.
 
 `$discount['value']` puede ser string si se suministró un numeric-string: no asumir `is_float($discount['value']) === true` ni exigir float mediante tipos estrictos sin conversión explícita. Esa conversión puede perder precisión; conservar el valor original para decisiones monetarias exactas.
+
+La tabla `shopping_cart` no forma parte de la instalación obligatoria del paquete. Sólo se necesita para la persistencia explícita mediante `store()`, `restore()` o `merge()`. `restore()` incorpora el snapshot almacenado a la sesión activa y después elimina ese registro persistido; `merge()` incorpora sus productos y metadatos sin consumir el snapshot, por lo que puede volver a utilizarse posteriormente.
 
 Consultar la [guía de actualización de 2.x a 3.x](docs/adjustments.es.md#actualización-desde-2x-a-3x) antes de desplegar.
 

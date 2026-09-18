@@ -46,7 +46,9 @@ A major release because of incompatible changes to public VAT semantics, account
 ### Compatibility
 
 - Laravel/Illuminate 10, 11, and 12 remain supported, with PHP 8.1 as the minimum; Laravel 11/12 require PHP >=8.2 through their dependencies.
-- No mandatory database migration. Valid legacy and v2 snapshots remain restorable; v2 retains its historical two-decimal precision, and historical rowIds are not regenerated during restore.
+- Database persistence for the cart is optional. The active cart, its products, and adjustment metadata work through Laravel's configured session storage; the `shopping_cart` table is only required when using `store()`, `restore()`, or `merge()`.
+- If the application uses `SESSION_DRIVER=database`, the session table required by Laravel is separate from the package's optional `shopping_cart` table.
+- Valid legacy and v2 snapshots remain restorable; v2 retains its historical two-decimal precision, and historical rowIds are not regenerated during `restore()`.
 - V3 snapshots include explicit precision and must not be consumed by older package versions.
 - The catalog must contain exactly 0/1/2/3. Configurations removing categories or adding extra fiscal keys are no longer valid; `name` and `value` remain configurable within the stated rules.
 
@@ -64,6 +66,8 @@ $totalTax = $item->tax;
 `taxTotal` already corresponds to the row; do not multiply it by quantity again. Review expected GENERAL/PNP/HKA totals, configured precision, and `cart.taxes`. Use `summary()` for fiscal settlement with costs and discounts.
 
 `$discount['value']` may be a string when a numeric string was supplied: do not assume `is_float($discount['value']) === true` or require float through strict type declarations without an explicit conversion. That conversion can lose precision; retain the original value for exact monetary decisions.
+
+The `shopping_cart` table is not part of the package's mandatory installation. It is only required for explicit persistence through `store()`, `restore()`, or `merge()`. `restore()` incorporates the stored snapshot into the active session and then deletes that persisted record; `merge()` incorporates its products and metadata without consuming the snapshot, so it can be used again later.
 
 See the [2.x to 3.x upgrade guide](docs/adjustments.md#upgrading-from-2x-to-3x) before deploying.
 
