@@ -20,7 +20,7 @@ A major release because of incompatible changes to public VAT semantics, account
 - Semantic validation of persisted costs, discounts, and observations, shared by session metadata and snapshots.
 - Validation of `fixedUnits` through integer states reachable across successive precision changes within 0..4.
 - Atomicity coverage for `restore()` and `merge()` when product, metadata, or snapshot validation fails.
-- CI coverage for Laravel/Illuminate 10, 11, and 12 across the ten supported PHP 8.1–8.4 combinations; `git diff --check HEAD^ HEAD` checks committed Git changes.
+- `git diff --check HEAD^ HEAD` checks committed Git changes.
 
 ### Changed
 

@@ -20,7 +20,7 @@ Versión mayor por cambios incompatibles en la semántica pública del IVA, la p
 - Validación semántica de costos, descuentos y observaciones persistidos, compartida por sesión y snapshots.
 - Validación de `fixedUnits` mediante estados enteros alcanzables a través de cambios sucesivos de precisión 0..4.
 - Cobertura de atomicidad de `restore()` y `merge()` ante fallos de validación de productos, metadatos y snapshots.
-- Cobertura de CI para Laravel/Illuminate 10, 11 y 12 en las diez combinaciones PHP 8.1–8.4 soportadas; `git diff --check HEAD^ HEAD` revisa cambios confirmados en Git.
+- `git diff --check HEAD^ HEAD` revisa cambios confirmados en Git.
 
 ### Cambiado
 
