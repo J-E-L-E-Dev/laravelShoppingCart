@@ -498,7 +498,8 @@ So a little example:
 
 ### Data base Configuration
 
-By default, the package will use the 'MySQL' database connection and utilize a table named 'shopping_cart'.
+By default, the package uses the database connection configured through `DB_CONNECTION`,
+falling back to `mysql`, and uses the `shopping_cart` table for optional cart persistence.
 
 If you wish to change these options, you will need to publish the configuration file.
 
@@ -626,6 +627,7 @@ The package will throw exceptions if something goes wrong. This makes it easier 
 | *CartAlreadyStoredException* | When trying to store a cart that was already stored using the specified identifier |
 | *InvalidRowIDException*      | When the rowId that got passed doesn't exists in the current cart instance         |
 | *UnknownModelException*      | When you try to associate an none existing model to a CartItem.                    |
+| *AmbiguousItemException*     | When a product code matches multiple cart lines; use the specific `rowId`          |
 
 ## Events
 
@@ -638,6 +640,8 @@ The cart also has events build in. There are five events available for you to li
 | cart.removed  | When an item is removed from the cart.   | The `CartItem` that was removed. |
 | cart.stored   | When the content of a cart was stored.   | -                                |
 | cart.restored | When the content of a cart was restored. | -                                |
+| cart.adding   | Before a `CartItem` is added through `addCartItem()`. | The `CartItem` being added. |
+| cart.merged   | When a persisted cart is merged into the active cart. | - |
 
 ## Contributing
 

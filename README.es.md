@@ -515,7 +515,9 @@ Entonces un pequeño ejemplo:
 
 ### Configuración de base de datos
 
-De forma predeterminada, el paquete utilizar&aacute; la conexi&oacute;n de base de datos 'MySQL' y la tabla `shopping_cart`.
+De forma predeterminada, el paquete utiliza la conexión de base de datos configurada
+mediante `DB_CONNECTION`, con `mysql` como valor alternativo, y la tabla `shopping_cart`
+para la persistencia opcional del carrito.
 
 Si desea cambiar estas opciones, deber&aacute; publicar el archivo de configuraci&oacute;n.
 
@@ -653,6 +655,7 @@ El paquete generar&aacute; excepciones si algo sale mal. Esto hace que sea m&aac
 | *CartAlreadyStoredException* | Al intentar almacenar un carrito que ya estaba almacenado usando el identificador especificado |
 | *InvalidRowIDException*      | Cuando el rowId que se pas&oacute; no existe en la instancia del carrito actual                |
 | *UnknownModelException*      | Cuando intentas asociar un modelo que no existe a un CartItem                                  |
+| *AmbiguousItemException*     | Cuando un código de producto coincide con varias líneas del carrito; se debe utilizar el `rowId` específico |
 
 ## Eventos
 
@@ -665,6 +668,8 @@ El carrito tambi&eacute;n tiene eventos integrados. Hay cinco eventos disponible
 | cart.removed  | Cuando se elimina un art&iacute;culo del carrito.            | El `CartItem` que se removio.       |
 | cart.stored   | Cuando se almacen&oacute; el contenido de un carrito.        | -                                   |
 | cart.restored | Cuando se restaur&oacute; el contenido de un carrito.        | -                                   |
+| cart.adding   | Antes de agregar un `CartItem` mediante `addCartItem()`. | El `CartItem` que se agregará. |
+| cart.merged   | Cuando un carrito persistido se fusiona con el carrito activo. | - |
 
 ## Contribuir
 
