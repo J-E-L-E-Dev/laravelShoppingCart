@@ -35,7 +35,7 @@ trait CartAdjustments
      * las observaciones manuales se almacenan en observations. Valida estructura y
      * reglas de dominio antes de convertir importes, sin liquidar cada operación.
      *
-     * @return array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} Estado documental de la instancia.
+     * @return array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: int|float|numeric-string, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} Estado documental de la instancia.
      */
     protected function metadata()
     {
@@ -175,7 +175,7 @@ trait CartAdjustments
      *
      * No modifica la colección de productos ni genera eventos.
      *
-     * @param array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} $metadata Listas de operaciones y observaciones manuales.
+     * @param array{decimals: int, costs: list<array{name: string, amount: int|float, cents: int, mode: 'item'|'prorated'|'tip'|'legacy', aliquot: int|string|null, description: string}>, discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: int|float|numeric-string, concept: string, fixedUnits?: int}>, observations: list<array{type: 'manual', text: string}>} $metadata Listas de operaciones y observaciones manuales.
      * @return void
      */
     protected function saveMetadata(array $metadata)
@@ -292,7 +292,8 @@ trait CartAdjustments
      * Valida y agrega una instrucción estructurada de descuento a la sesión.
      *
      * Valida modalidad, valor finito no negativo, porcentaje máximo y límite de Money.
-     * Conserva value como float sin guardar aún el monto efectivo; concept se
+     * Conserva el tipo y representación numérica de value, incluidos numeric-string
+     * exactos, sin guardar aún el monto efectivo; concept se
      * convierte a string. No resuelve ni comprueba el rowId recibido.
      *
      * @param string|null $rowId Clave de línea, o null para descuento general.
@@ -312,7 +313,7 @@ trait CartAdjustments
         }
         $units = Money::minorUnits($value);
         $metadata = $this->metadata();
-        $discount = ['rowId' => $rowId, 'type' => $type, 'value' => (float) $value, 'concept' => (string) $concept];
+        $discount = ['rowId' => $rowId, 'type' => $type, 'value' => $value, 'concept' => (string) $concept];
         if ($type === 'fixed') $discount['fixedUnits'] = $units;
         $metadata['discounts'][] = $discount;
         $this->saveMetadata($metadata);
@@ -351,7 +352,7 @@ trait CartAdjustments
      * entero y allocations contiene las unidades menores descontados por rowId.
      * Los montos se recalculan al consultar, incluso si las cantidades cambiaron.
      *
-     * @return Collection<int, array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int, amount: int|float, cents: int, allocations: array<string, int>}> Operaciones efectivas.
+     * @return Collection<int, array{rowId: string|null, type: 'percentage'|'fixed', value: int|float|numeric-string, concept: string, fixedUnits?: int, amount: int|float, cents: int, allocations: array<string, int>}> Operaciones efectivas.
      * @throws \DomainException Si hay bases negativas o un prorrateo positivo sin base distribuible.
      * @throws \InvalidArgumentException Si un importe o reparto excede los límites de Money.
      */
@@ -393,7 +394,7 @@ trait CartAdjustments
      *     amount?: int|float,
      *     discountType?: 'percentage'|'fixed',
      *     rowId?: string|null,
-     *     value?: float,
+     *     value?: int|float|numeric-string,
      *     concept?: string,
      *     cents?: int,
      *     allocations?: array<string, int>
@@ -490,7 +491,7 @@ trait CartAdjustments
      *     tip: int|float,
      *     legacyCost: int|float,
      *     totalCost: int|float,
-     *     discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: float, concept: string, fixedUnits?: int, amount: int|float, cents: int, allocations: array<string, int>}>,
+     *     discounts: list<array{rowId: string|null, type: 'percentage'|'fixed', value: int|float|numeric-string, concept: string, fixedUnits?: int, amount: int|float, cents: int, allocations: array<string, int>}>,
      *     totalDiscount: int|float,
      *     total: int|float
      * } Liquidación numérica completa.

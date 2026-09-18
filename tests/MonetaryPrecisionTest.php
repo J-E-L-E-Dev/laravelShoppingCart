@@ -1247,7 +1247,7 @@ class MonetaryPrecisionTest extends TestCase
         self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
         self::assertSame($before, serialize($this->session->all()));
         $this->cart->addObservation('still valid');
-        self::assertSame((float) $value, $this->session->get('cart_metadata.shopping_cart')['discounts'][0]['value']);
+        self::assertSame($value, $this->session->get('cart_metadata.shopping_cart')['discounts'][0]['value']);
         $this->cart->store('sequential');
         $this->cart->store('sequential-merge');
         $this->cart->destroy();
@@ -1258,6 +1258,63 @@ class MonetaryPrecisionTest extends TestCase
         self::assertTrue($this->cart->merge('sequential-merge'));
         self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
         self::assertSame(1, $this->db->table('shopping_cart')->where('identifier', 'sequential-merge')->count());
+    }
+
+    public static function discountRepresentations(): array
+    {
+        return [
+            ['fixed', '1.234449999999999999', 12344],
+            ['fixed', 1.23445, 12345],
+            ['fixed', 5, 50000],
+            ['percentage', '10.123456789012345', 101235],
+        ];
+    }
+
+    /** @dataProvider discountRepresentations */
+    public function testDiscountRepresentationSurvivesQueriesAndPersistence($type, $value, $units): void
+    {
+        config(['cart.format.decimals' => 4]);
+        $this->cart->add('A', 'A', 1, 100, 0);
+        $this->cart->addDiscount($type, $value, 'Exact representation');
+        $assertDiscount = function () use ($type, $value, $units) {
+            $discount = $this->session->get('cart_metadata.shopping_cart')['discounts'][0];
+            self::assertSame($value, $discount['value']);
+            if ($type === 'fixed') self::assertSame($units, $discount['fixedUnits']);
+            else self::assertArrayNotHasKey('fixedUnits', $discount);
+            self::assertSame($units, $this->cart->summary()['discounts'][0]['cents']);
+            self::assertSame($value, $this->cart->discounts()->first()['value']);
+        };
+        $assertDiscount();
+        $this->cart->addObservation('still valid');
+        $assertDiscount();
+        $this->cart->store('exact-fixed');
+        $this->cart->store('exact-fixed-merge');
+        $snapshot = unserialize($this->db->table('shopping_cart')->where('identifier', 'exact-fixed')->value('content'));
+        self::assertSame($value, $snapshot['metadata']['discounts'][0]['value']);
+        $this->cart->destroy();
+        $this->cart->restore('exact-fixed');
+        $assertDiscount();
+        self::assertSame(0, $this->db->table('shopping_cart')->where('identifier', 'exact-fixed')->count());
+        $this->cart->destroy();
+        self::assertTrue($this->cart->merge('exact-fixed-merge'));
+        $assertDiscount();
+        self::assertSame(1, $this->db->table('shopping_cart')->where('identifier', 'exact-fixed-merge')->count());
+    }
+
+    public function testExactFixedStringSurvivesSequentialPrecisionChanges(): void
+    {
+        $value = '1.234449999999999999';
+        config(['cart.format.decimals' => 4]);
+        $this->cart->add('A', 'A', 1, 100, 0);
+        $this->cart->addDiscountToItem('A', 'fixed', $value, 'Exact numeric string');
+        foreach ([4 => 12344, 3 => 1234, 2 => 123] as $decimals => $expected) {
+            config(['cart.format.decimals' => $decimals]);
+            $this->cart->addObservation('Precision '.$decimals);
+            $discount = $this->session->get('cart_metadata.shopping_cart')['discounts'][0];
+            self::assertSame($value, $discount['value']);
+            self::assertSame($expected, $discount['fixedUnits']);
+            self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
+        }
     }
 
     private function assertTaxSums(): void
