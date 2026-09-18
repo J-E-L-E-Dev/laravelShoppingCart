@@ -1177,7 +1177,8 @@ class MonetaryPrecisionTest extends TestCase
     public static function inconsistentFixedUnits(): array
     {
         // Para value=5 ninguna precisión 0..4 puede cuantizar el importe a cero.
-        return [[.01, 100000, 2], [.125, 999, 3], [5, 0, 2]];
+        // Para 1.23449, los estados alcanzables a precisión 2 son 100, 120, 123 y 124; nunca 125.
+        return [[.01, 100000, 2], [.125, 999, 3], [5, 0, 2], [1.23449, 125, 2]];
     }
 
     /** @dataProvider inconsistentFixedUnits */
@@ -1205,6 +1206,58 @@ class MonetaryPrecisionTest extends TestCase
                 $this->assertRejectedWithoutMutation(fn () => $this->cart->$operation('source'));
             }
         }
+    }
+
+    public static function sequentialPrecisionRoutes(): array
+    {
+        $cases = [];
+        foreach ([[4, 3, 2], [4, 2], [2, 4, 3], [3, 2, 4], [4, 1, 4, 2]] as $route) {
+            foreach ([1.23449, .125, .005, .004, 10] as $value) {
+                $cases[implode(' -> ', $route).' value '.$value] = [$route, $value];
+            }
+        }
+        return $cases;
+    }
+
+    /** @dataProvider sequentialPrecisionRoutes */
+    public function testSequentialPrecisionHistorySurvivesQueriesRestoreAndMerge($route, $value): void
+    {
+        $previous = $route[0];
+        config(['cart.format.decimals' => $previous]);
+        $this->cart->add('A', 'A', 1, 100, 0);
+        $this->cart->addDiscount('fixed', $value, 'Sequential precision');
+        $expected = Money::minorUnits($value, false, $previous);
+        $history = [$expected];
+        self::assertSame($expected, $this->session->get('cart_metadata.shopping_cart')['discounts'][0]['fixedUnits']);
+        foreach (array_slice($route, 1) as $next) {
+            $expected = Money::rescale($expected, $previous, $next);
+            config(['cart.format.decimals' => $next]);
+            $this->cart->addObservation('step '.$next);
+            $metadata = $this->session->get('cart_metadata.shopping_cart');
+            self::assertSame($expected, $metadata['discounts'][0]['fixedUnits']);
+            self::assertSame($next, $metadata['decimals']);
+            $history[] = $expected;
+            $previous = $next;
+        }
+        if ($route === [4, 3, 2] && $value === 1.23449) {
+            self::assertSame([12345, 1235, 124], $history);
+            self::assertSame(123, Money::rescale($history[0], 4, 2));
+        }
+        $before = serialize($this->session->all());
+        self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
+        self::assertSame($before, serialize($this->session->all()));
+        $this->cart->addObservation('still valid');
+        self::assertSame((float) $value, $this->session->get('cart_metadata.shopping_cart')['discounts'][0]['value']);
+        $this->cart->store('sequential');
+        $this->cart->store('sequential-merge');
+        $this->cart->destroy();
+        $this->cart->restore('sequential');
+        self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
+        self::assertSame(0, $this->db->table('shopping_cart')->where('identifier', 'sequential')->count());
+        $this->cart->destroy();
+        self::assertTrue($this->cart->merge('sequential-merge'));
+        self::assertSame($expected, $this->cart->summary()['discounts'][0]['cents']);
+        self::assertSame(1, $this->db->table('shopping_cart')->where('identifier', 'sequential-merge')->count());
     }
 
     private function assertTaxSums(): void

@@ -118,12 +118,31 @@ trait CartAdjustments
         }
     }
 
-    /** Acepta únicamente unidades reproducibles desde alguna precisión histórica soportada. */
+    /**
+     * Busca estados (precisión, unidades) alcanzables por cambios sucesivos de precisión.
+     * Sólo los estados iniciales se cuantizan desde value; cada transición conserva
+     * el redondeo acumulado mediante rescale(). visited elimina ciclos y duplicados.
+     */
     private function validateFixedUnitsConsistency($value, $fixedUnits, $storedDecimals)
     {
+        $queue = [];
+        $visited = [];
         for ($originDecimals = 0; $originDecimals <= Money::MAX_DECIMALS; $originDecimals++) {
             $originUnits = Money::minorUnits($value, false, $originDecimals);
-            if (Money::rescale($originUnits, $originDecimals, $storedDecimals) === $fixedUnits) return;
+            $queue[] = [$originDecimals, $originUnits];
+            $visited[$originDecimals.':'.$originUnits] = true;
+        }
+        for ($index = 0; $index < count($queue); $index++) {
+            [$decimals, $units] = $queue[$index];
+            if ($decimals === $storedDecimals && $units === $fixedUnits) return;
+            for ($next = 0; $next <= Money::MAX_DECIMALS; $next++) {
+                $nextUnits = Money::rescale($units, $decimals, $next);
+                $key = $next.':'.$nextUnits;
+                if (!isset($visited[$key])) {
+                    $visited[$key] = true;
+                    $queue[] = [$next, $nextUnits];
+                }
+            }
         }
         throw new \InvalidArgumentException('Invalid cart metadata: fixedUnits is inconsistent with value and supported historical precision.');
     }
