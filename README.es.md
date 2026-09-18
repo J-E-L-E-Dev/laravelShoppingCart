@@ -26,9 +26,11 @@ Laravel Shopping Cart es un paquete de carrito de compras que permite manejar di
 Podemos agregar la dependencia en nuestro archivo `composer.json`:
 
 ```json
+{
     "require": {
         "edwinylil1/laravelshoppingcart": "^3.0"
-    },
+    }
+}
 ```
 
 o ejecutar
@@ -57,12 +59,24 @@ Puede seguir los enlaces para navegar r&aacute;pidamente al tema de su inter&eac
 
 ## Configuración
 
-El carrito de compras almacena informaci&oacute;n en sesiones. Sin embargo, puede guardar el carrito en la base de datos para recuperarlo m&aacute;s tarde.
+El carrito almacena su estado activo en el almacenamiento de sesión configurado por Laravel.
 
-De forma predeterminada, el paquete utilizar&aacute; la conexi&oacute;n de base de datos 'MySQL' y utilizar&aacute; una tabla llamada 'shopping_cart'.
+La persistencia en base de datos es opcional y sólo es necesaria cuando se desea
+guardar un carrito para recuperarlo o fusionarlo posteriormente mediante `store()`,
+`restore()` o `merge()`.
+
+Por lo tanto, puede utilizar el carrito, productos, costos, descuentos, observaciones
+y `summary()` sin crear la tabla `shopping_cart`.
+
+El mecanismo de almacenamiento de sesión lo controla Laravel mediante
+`SESSION_DRIVER` (por ejemplo `file`, `redis` o `database`). Si Laravel utiliza
+`SESSION_DRIVER=database`, Laravel puede requerir su propia tabla de sesiones; esa
+tabla es independiente de la tabla opcional `shopping_cart` utilizada por este paquete.
+
+Cuando se utiliza la persistencia opcional del carrito, el paquete usa de forma
+predeterminada la conexión de base de datos configurada y la tabla `shopping_cart`.
 
 El paquete est&aacute; diseñado para manejar cuatro tasas de impuestos para productos. Si la alicuota se pasa en null, se establece una alicuota predeterminada para los productos.
-
 
 Las alicuotas con sus valores de tasas por defecto son:
 
@@ -279,7 +293,6 @@ las cantidades. Una cantidad cero o negativa elimina la línea.
 
 Para recuperar el contenido del carrito, utilizar&aacute; el m&eacute;todo `content()`. Este m&eacute;todo devolver&aacute; una colecci&oacute;n de CartItems que puede iterar y mostrar el contenido a sus clientes.
 
-
 ```php
     Cart::content();
 ```
@@ -468,19 +481,42 @@ Entonces un pequeño ejemplo:
     // Y otra vez el recuento del carrito 'wishlist'
     Cart::instance('wishlist')->count();
 ```
+
 **NOTA. Tenga en cuenta que el carrito permanece en la &uacute;ltima instancia establecida mientras no establezca una diferente durante la ejecuci&oacute;n del script.**
 
 **NOTA.2 La instancia de carrito predeterminada se llama `shopping_cart`, por lo que cuando no est&aacute;s usando instancias, `Cart::content();` es lo mismo que `Cart::instance('shopping_cart')->content()`.**
 
 ## Base de datos
 
+> **La persistencia en base de datos es opcional.**
+>
+> El carrito activo y los metadatos de sus ajustes se almacenan en la sesión de Laravel.
+> No necesita la tabla `shopping_cart` para utilizar la API normal del carrito,
+> incluidos productos, costos, descuentos, observaciones y `summary()`.
+>
+> La tabla `shopping_cart` sólo es necesaria al utilizar operaciones de carritos
+> persistidos como `store()`, `restore()` o `merge()`.
+
 * [Configuración](#configuración-de-base-de-datos)
 * [Guardar el carrito](#guardar-el-carrito)
-* [Restaurando el carro](#restaurando-el-carro)
+* [Restaurar el carrito](#restaurar-el-carrito)
+* [Fusionar un carrito almacenado](#fusionar-un-carrito-almacenado)
+
+| Función | Sesión de Laravel | Tabla `shopping_cart` |
+| --- | --- | --- |
+| Carrito activo | Requerida | No requerida |
+| Productos | Sí | No requerida |
+| Costos y descuentos | Sí | No requerida |
+| Observaciones | Sí | No requerida |
+| `summary()` / totales / impuestos | Sí | No requerida |
+| `store()` | Sí | Requerida |
+| `restore()` | Sí | Requerida |
+| `merge()` de carrito persistido | Sí | Requerida |
 
 ### Configuración de base de datos
 
-De forma predeterminada, el paquete utilizar&aacute; la conexi&oacute;n de base de datos 'MySQL' y utilizar&aacute; una tabla llamada 'shopping_cart'.
+De forma predeterminada, el paquete utilizar&aacute; la conexi&oacute;n de base de datos 'MySQL' y la tabla `shopping_cart`.
+
 Si desea cambiar estas opciones, deber&aacute; publicar el archivo de configuraci&oacute;n.
 
 ```bash
@@ -489,41 +525,77 @@ Si desea cambiar estas opciones, deber&aacute; publicar el archivo de configurac
 
 Esto le dar&aacute; un archivo de configuraci&oacute;n `cart.php` en el que podr&aacute; realizar los cambios.
 
-Para facilitarle la vida, el paquete tambi&eacute;n incluye una "migraci&oacute;n" lista para usar que puede publicar ejecutando:
+Si desea utilizar persistencia en base de datos mediante `store()`, `restore()` o
+`merge()`, el paquete incluye una migración lista para usar:
 
 ```bash
     php artisan vendor:publish --provider="JeleDev\Shoppingcart\ShoppingcartServiceProvider" --tag="migrations"
 ```
 
-Esto colocar&aacute; el archivo de migraci&oacute;n de la tabla `shopping_cart` en el directorio `database/migrations`. Ahora todo lo que tienes que hacer es ejecutar `php artisan migrate` para migrar tu base de datos.
+Esto publica la migración de la tabla `shopping_cart` en el directorio
+`database/migrations`.
+
+Ejecute la migración únicamente cuando quiera habilitar esta función opcional de persistencia:
+
+```bash
+php artisan migrate
+```
+
+Si sólo utiliza el carrito mediante el almacenamiento de sesión configurado por Laravel,
+no necesita publicar ni ejecutar la migración de `shopping_cart`.
 
 ### Guardar el carrito
 
-Para almacenar su instancia de carrito en la base de datos, debe llamar al m&eacute;todo `store($identifier) ​​`. Donde `$identifier` es una clave aleatoria, por ejemplo, la identificaci&oacute;n o el username del usuario.
+Para almacenar una instancia del carrito en la base de datos, llame al método
+`store($identifier)`, donde `$identifier` es una clave que identifica el carrito,
+por ejemplo el id o username del usuario.
 
 ```php
-    Cart::store('username');
+Cart::store('username');
 ```
 
-Para almacenar una instancia de carrito llamada 'custom name'
+Para almacenar una instancia llamada 'custom name':
 
 ```php
-    Cart::instance('custom name')->store('code');
+Cart::instance('custom name')->store('code');
 ```
 
-### Restaurando el carro
+### Restaurar el carrito
 
-Si desea recuperar el carrito de la base de datos y restaurarlo, todo lo que tiene que hacer es llamar a `restore($identifier)` donde `$identifier` es la clave que especific&oacute; para el m&eacute;todo `store`.
+Para recuperar un carrito almacenado en la base de datos y restaurarlo, llame a
+`restore($identifier)`, donde `$identifier` es la clave especificada al utilizar
+`store()`.
 
 ```php
-    Cart::restore('username');
+Cart::restore('username');
 ```
 
-Para restaurar una instancia de carrito llamada 'custom name'
+Para restaurar una instancia llamada 'custom name':
 
 ```php
-    Cart::instance('custom name')->restore('code');
+Cart::instance('custom name')->restore('code');
 ```
+
+### Fusionar un carrito almacenado
+
+Use `merge($identifier)` para fusionar un carrito almacenado previamente con el
+carrito actualmente activo.
+
+```php
+Cart::merge('username');
+```
+
+Para fusionar un carrito almacenado con una instancia de carrito específica:
+
+```php
+Cart::instance('custom name')->merge('code');
+```
+
+El carrito almacenado se lee desde la tabla opcional de persistencia `shopping_cart`
+y se fusiona con el carrito activo de la sesión de Laravel.
+
+A diferencia de `restore()`, `merge()` mantiene disponible el carrito almacenado
+para utilizarlo posteriormente.
 
 ## Colecciones
 
