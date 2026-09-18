@@ -796,6 +796,122 @@ class MonetaryPrecisionTest extends TestCase
         $this->assertTaxSums();
     }
 
+    public static function corruptStoredProducts(): array
+    {
+        $cases = [];
+        foreach (['legacy', 2, 3] as $version) foreach (['restore', 'merge'] as $operation) {
+            foreach (['price' => INF, 'qty' => INF, 'entry' => new \stdClass()] as $field => $value) {
+                $cases[$version.' '.$operation.' '.$field] = [$version, $operation, $field, $value];
+            }
+        }
+        $invalid = [
+            'price' => [-1, -.01, -INF, NAN, 'abc', 1000000001],
+            'qty' => [0, -1, -.01, -INF, NAN, 'abc', null, true, [], 1e308],
+            'entry' => [null, [], 'abc'],
+            'options' => [null, 'abc', new \stdClass(), 1],
+            'id' => [null, [], ''],
+            'name' => ['', null, []],
+        ];
+        foreach (['restore', 'merge'] as $operation) foreach ($invalid as $field => $values) {
+            foreach ($values as $index => $value) $cases[$operation.' '.$field.' '.$index] = [3, $operation, $field, $value];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider corruptStoredProducts */
+    public function testCorruptStoredProductsAreRejectedAtomically($version, $operation, $field, $value): void
+    {
+        $this->cart->instance('integrity');
+        $this->cart->add('first', 'First valid', 1, 1, 0);
+        $last = $this->cart->add('last', 'Last valid', 1, 10, 0);
+        $this->cart->addCost('snapshot-cost', 1, 'item', 3);
+        $this->cart->addDiscount('fixed', .1);
+        $this->cart->addObservation('Snapshot observation');
+        $this->cart->store('corrupt');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        if ($field === 'entry') $snapshot['content']->put($last->rowId, $value);
+        else $snapshot['content']->get($last->rowId)->$field = $value;
+        if ($version === 'legacy') $snapshot = $snapshot['content'];
+        else {
+            $snapshot['version'] = $version;
+            if ($version === 2) unset($snapshot['decimals']);
+        }
+        $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+        $this->cart->destroy();
+        $existing = $this->cart->add('existing', 'Existing', 2, 3, 0, ['color' => 'blue']);
+        $this->cart->addCost('current-cost', 2, 'item', 0);
+        $this->cart->addDiscount('fixed', .2);
+        $this->cart->addObservation('Current observation');
+        $existing->aliquot = null;
+        $this->cart->createdAt = new \Carbon\Carbon('2020-01-01');
+        $this->cart->updatedAt = new \Carbon\Carbon('2020-02-01');
+        $createdAt = $this->cart->createdAt;
+        $updatedAt = $this->cart->updatedAt;
+        $before = serialize($this->session->all());
+        $database = serialize($this->db->table('shopping_cart')->get()->all());
+        $events = [];
+        foreach (['cart.restored', 'cart.merged', 'cart.adding', 'cart.added'] as $event) {
+            $this->events->listen($event, function () use (&$events, $event) { $events[] = $event; });
+        }
+        try {
+            if ($operation === 'restore') $this->cart->restore('corrupt');
+            else $this->cart->merge('corrupt', true, 'integrity');
+            self::fail('Corrupt product accepted');
+        } catch (InvalidArgumentException $e) {
+            self::assertNotSame('', $e->getMessage());
+            if ($field === 'entry') self::assertSame('Invalid cart snapshot: every product must be a CartItem.', $e->getMessage());
+        }
+        self::assertSame($before, serialize($this->session->all()));
+        self::assertSame($database, serialize($this->db->table('shopping_cart')->get()->all()));
+        self::assertSame('integrity', $this->cart->currentInstance());
+        self::assertSame($createdAt, $this->cart->createdAt);
+        self::assertSame($updatedAt, $this->cart->updatedAt);
+        self::assertSame([], $events);
+        self::assertNull($existing->aliquot);
+    }
+
+    public static function compatibleStoredProducts(): array
+    {
+        $cases = [];
+        foreach (['legacy', 2, 3] as $version) foreach (['restore', 'merge'] as $operation) {
+            foreach ([false, true] as $arrayOptions) $cases[] = [$version, $operation, $arrayOptions];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider compatibleStoredProducts */
+    public function testStoredLegacyAliquotAndRowIdRemainCompatible($version, $operation, $arrayOptions): void
+    {
+        config(['cart.default_aliquot' => 2]);
+        $item = $this->cart->add('legacy', 'Legacy', '2', 10, 2, ['color' => 'blue']);
+        $this->cart->store('compatible');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        $storedItem = $snapshot['content']->get($item->rowId);
+        $storedItem->aliquot = null;
+        $storedItem->rowId = 'historical-row-id';
+        if ($arrayOptions) $storedItem->options = $storedItem->options->all();
+        $snapshot['content'] = new Collection(['historical-row-id' => $storedItem]);
+        if ($version === 'legacy') $snapshot = $snapshot['content'];
+        else {
+            $snapshot['version'] = $version;
+            if ($version === 2) unset($snapshot['decimals']);
+        }
+        $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+        $this->cart->destroy();
+        $this->cart->$operation('compatible');
+        $restored = $this->cart->getById('legacy');
+        self::assertSame(2, $restored->aliquot);
+        self::assertSame('historical-row-id', $restored->rowId);
+        self::assertNotSame($restored->identity(), $restored->rowId);
+        self::assertSame(['color' => 'blue'], $restored->options->all());
+        self::assertSame('2', $restored->qty);
+        self::assertSame(160, Money::minorUnits($restored->tax));
+        self::assertSame(2160, Money::minorUnits($this->cart->total()));
+        self::assertSame(2160, Money::minorUnits($this->cart->summary()['total']));
+        self::assertSame($operation === 'restore' ? 0 : 1, $this->db->table('shopping_cart')->count());
+        $this->assertTaxSums();
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();

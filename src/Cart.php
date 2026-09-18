@@ -793,6 +793,8 @@ class Cart
      * Guarda sesión, despacha cart.restored, recupera fechas y elimina el snapshot.
      * Prevalida destino, origen, metadatos y fechas sin mutar sesión; un fallo de
      * validación conserva productos, metadatos, instancia, fechas y snapshot.
+     * Rechaza productos almacenados inválidos mediante validateStoredCartItems(),
+     * compartido con merge(), antes de incorporar cualquier entrada.
      * Para sustituir todo el carrito debe llamarse destroy() antes de restaurar.
      *
      * @param int|string|InstanceIdentifier $identifier Identificador del snapshot de la instancia seleccionada.
@@ -827,6 +829,7 @@ class Cart
         $metadata = $this->metadata();
         $content = $this->session->get($this->instance, new Collection);
         $this->validateFiscalAliquots($content, $metadata['costs']);
+        $storedContent = $this->validateStoredCartItems($storedContent);
         $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
         foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
         $createdAt = Carbon::parse(data_get($stored, 'created_at'));
@@ -862,8 +865,8 @@ class Cart
      * del origen después de los actuales; remapea los descuentos de línea al rowId
      * que sobreviva. Acepta Collection antigua y sobres con version/metadata.
      * Despacha cart.merged; repetir la llamada vuelve a incorporar datos.
-     * Prevalida metadatos, alícuotas del destino y el recálculo fiscal de todas
-     * las entradas sobre copias antes de incorporar el primer producto.
+     * Prevalida metadatos, alícuotas del destino y todos los atributos comerciales
+     * y fiscales de las entradas sobre copias antes de incorporar el primer producto.
      *
      * @param int|string|InstanceIdentifier $identifier Identificador del snapshot de origen.
      * @param bool $dispatchAdd Si se publican cart.adding/cart.added por producto.
@@ -888,14 +891,10 @@ class Cart
             $incomingMetadata = $this->snapshotMetadata($storedContent);
             $storedContent = $storedContent['content'];
         }
+        $storedContent = $this->validateStoredCartItems($storedContent);
         $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
         $metadata = $this->metadata();
         $this->validateFiscalAliquots($this->session->get($this->instance, new Collection), $metadata['costs']);
-        // addCartItem recalcula el impuesto: comprueba cada entrada antes de incorporar la primera.
-        foreach ($storedContent as $cartItem) {
-            $candidate = clone $cartItem;
-            $candidate->setTaxRate($candidate->aliquot);
-        }
         $identities = [];
         foreach ($storedContent as $cartItem) {
             $oldRowId = $cartItem->rowId;
@@ -980,6 +979,45 @@ class Cart
         }
 
         return null;
+    }
+
+    /**
+     * Valida todo el snapshot mediante las reglas de CartItem, sin mutar sus objetos.
+     * Devuelve copias con opciones normalizadas y alícuota legacy resuelta; conserva
+     * rowId histórico y atributos adicionales, sin compararlo con identity().
+     * @return Collection Productos preparados sólo después de validar todas las entradas.
+     * @throws \InvalidArgumentException Si el contenido o cualquier producto es inválido.
+     */
+    private function validateStoredCartItems($content)
+    {
+        if (!is_array($content) && !$content instanceof Collection) {
+            throw new \InvalidArgumentException('Invalid cart snapshot: product content must be an array or Collection.');
+        }
+        $validated = new Collection;
+        foreach ($content as $key => $item) {
+            if (!$item instanceof CartItem) {
+                throw new \InvalidArgumentException('Invalid cart snapshot: every product must be a CartItem.');
+            }
+            $options = $item->options;
+            if ($options instanceof CartItemOptions) $options = $options->all();
+            if (!is_array($options)) {
+                throw new \InvalidArgumentException('Invalid cart snapshot: product options must be an array or CartItemOptions.');
+            }
+            if (!is_string($item->rowId) && !is_int($item->rowId)) {
+                throw new \InvalidArgumentException('Invalid cart snapshot: product rowId must be a string or integer.');
+            }
+            $candidate = new CartItem($item->id, $item->name, $item->price,
+                $item->aliquot ?? config('cart.default_aliquot'), $options);
+            $candidate->setQuantity($item->qty);
+            // También comprueba el importe de fila: cantidades finitas pueden desbordar qty × price.
+            Money::minorUnits($candidate->qty * $candidate->price);
+            $candidate->tax;
+            $copy = clone $item;
+            $copy->aliquot = $candidate->aliquot;
+            $copy->options = $candidate->options;
+            $validated->put($key, $copy);
+        }
+        return $validated;
     }
 
     /** Valida productos y costos ITEM antes de mutar sesión; conserva el default histórico para alícuotas omitidas. */
