@@ -540,6 +540,169 @@ class MonetaryPrecisionTest extends TestCase
         }
     }
 
+    public static function invalidCatalogs(): array
+    {
+        $catalog = [0 => ['name' => 'GENERAL', 'value' => 16], 1 => ['name' => 'EXEMPT', 'value' => 0],
+            2 => ['name' => 'REDUCED', 'value' => 8], 3 => ['name' => 'LUXURY', 'value' => 31]];
+        $cases = ['empty' => [[]]];
+        foreach ([0, 1, 2, 3] as $key) {
+            $invalid = $catalog;
+            unset($invalid[$key]);
+            $cases['missing '.$key] = [$invalid];
+        }
+        foreach ([4, 99, '03'] as $key) $cases['extra '.$key] = [$catalog + [$key => ['name' => 'EXTRA', 'value' => 10]]];
+        foreach (['GENERAL', 'general', ' GENERAL ', '', '   ', null, 16, []] as $index => $name) {
+            $invalid = $catalog;
+            $invalid[2]['name'] = $name;
+            $cases['name '.$index] = [$invalid];
+        }
+        $invalid = $catalog;
+        $invalid[0]['name'] = 'ÁLICUOTA';
+        $invalid[2]['name'] = 'álicuota';
+        $cases['unicode duplicate'] = [$invalid];
+        foreach (['name', 'value'] as $field) {
+            $invalid = $catalog;
+            unset($invalid[3][$field]);
+            $cases['missing field '.$field] = [$invalid];
+        }
+        $invalid = $catalog;
+        $invalid[3] = null;
+        $cases['invalid entry'] = [$invalid];
+        return $cases;
+    }
+
+    /** @dataProvider invalidCatalogs */
+    public function testCatalogIntegrityBeforeQueriesAndWrites($catalog): void
+    {
+        $item = $this->cart->add('A', 'A', 1, 10, 3);
+        $this->cart->addCost('service', 1, 'item', 3);
+        $before = serialize($this->session->all());
+        config(['cart.taxes' => $catalog]);
+        foreach (['GENERAL', 'PNP', 'HKA'] as $driver) {
+            config(['cart.driver' => $driver]);
+            foreach ([fn () => FiscalCalculator::taxCatalog(), fn () => $this->cart->summary(),
+                fn () => $this->cart->totalTaxes(new Collection([$item]), []), fn () => $item->toArray(),
+                fn () => $this->cart->add('B', 'B', 1, 1, 0), fn () => $this->cart->update($item->rowId, ['qty' => 2]),
+                fn () => $this->cart->setTax($item->rowId, 0), fn () => $this->cart->addCost('invalid', 1, 'item', 3)] as $route) {
+                try { $route(); self::fail('Invalid catalog accepted'); }
+                catch (InvalidArgumentException $e) { self::assertStringContainsString('Invalid tax configuration:', $e->getMessage()); }
+                self::assertSame($before, serialize($this->session->all()));
+            }
+        }
+    }
+
+    public function testFourAliquotsAcceptCanonicalStringKeysAndKeepConfiguredNames(): void
+    {
+        $catalog = ['3' => ['name' => ' Luxury custom ', 'value' => 150], '2' => ['name' => 'Reducido', 'value' => 8],
+            '1' => ['name' => 'Exento', 'value' => 0], '0' => ['name' => 'General custom', 'value' => '16.0000']];
+        config(['cart.taxes' => $catalog]);
+        self::assertSame($catalog, FiscalCalculator::taxCatalog());
+        foreach (['GENERAL', 'PNP', 'HKA'] as $driver) {
+            $lines = [];
+            foreach (['0', '1', '2', '3'] as $aliquot) {
+                self::assertSame($catalog[$aliquot]['value'], FiscalCalculator::taxRate($aliquot));
+                $lines['line'.$aliquot] = ['aliquot' => $aliquot, 'base' => 10000, 'rawBase' => 100];
+            }
+            $result = FiscalCalculator::calculate($lines, $driver);
+            self::assertSame(4, count($result['lineTaxes']));
+            self::assertSame(array_column($catalog, 'name'), array_keys($result['taxes']));
+            foreach ($catalog as $key => $tax) self::assertSame(Money::minorUnits($tax['value']), $result['lineTaxes']['line'.$key]);
+        }
+        self::assertSame($catalog, config('cart.taxes'));
+    }
+
+    public static function invalidFiscalLines(): array
+    {
+        $cases = [];
+        foreach ([9, -1, '03', '3.0', false, null, [], 'unknown'] as $key => $aliquot) {
+            $cases['aliquot '.$key] = [['aliquot' => $aliquot, 'base' => 100, 'rawBase' => 1]];
+        }
+        foreach (['aliquot', 'base', 'rawBase'] as $field) {
+            $line = ['aliquot' => 0, 'base' => 100, 'rawBase' => 1];
+            unset($line[$field]);
+            $cases['missing '.$field] = [$line];
+        }
+        $cases['not array'] = [null];
+        return $cases;
+    }
+
+    /** @dataProvider invalidFiscalLines */
+    public function testAllFiscalLinesAreValidatedBeforeAnyCalculation($invalid): void
+    {
+        foreach (['GENERAL', 'PNP', 'HKA'] as $driver) {
+            try {
+                // Una base inválida en la primera fila no debe impedir detectar la segunda antes de calcular.
+                FiscalCalculator::calculate(['first' => ['aliquot' => 0, 'base' => null, 'rawBase' => []], 'invalid' => $invalid], $driver);
+                self::fail('Invalid fiscal line accepted');
+            } catch (InvalidArgumentException $e) {
+                self::assertMatchesRegularExpression('/^Invalid (aliquot|fiscal line):/', $e->getMessage());
+            }
+        }
+    }
+
+    public function testInvalidExistingProductAndItemCostCannotProducePartialQueries(): void
+    {
+        $item = $this->cart->add('A', 'A', 1, 10, 3);
+        $item->aliquot = 9;
+        $before = serialize($this->session->all());
+        foreach ([fn () => $this->cart->summary(), fn () => $this->cart->totalTaxes(new Collection([$item]), []),
+            fn () => $item->tax, fn () => $this->cart->content()] as $route) {
+            try { $route(); self::fail('Unknown product aliquot accepted'); }
+            catch (InvalidArgumentException $e) { self::assertStringStartsWith('Invalid aliquot:', $e->getMessage()); }
+            self::assertSame($before, serialize($this->session->all()));
+        }
+        $item->aliquot = 3;
+        $this->cart->addCost('service', 1, 'item', 3);
+        $metadata = $this->session->get('cart_metadata.shopping_cart');
+        $metadata['costs'][0]['aliquot'] = 9;
+        $this->session->put('cart_metadata.shopping_cart', $metadata);
+        $before = serialize($this->session->all());
+        foreach ([fn () => $this->cart->summary(), fn () => $this->cart->addCost('invalid', 1, 'item', 9),
+            fn () => $this->cart->add('B', 'B', 1, 1, 9), fn () => $this->cart->update($item->rowId, ['aliquot' => 9]),
+            fn () => $this->cart->setTax($item->rowId, 9)] as $route) {
+            try { $route(); self::fail('Unknown aliquot accepted'); }
+            catch (InvalidArgumentException $e) { self::assertStringStartsWith('Invalid aliquot:', $e->getMessage()); }
+            self::assertSame($before, serialize($this->session->all()));
+        }
+    }
+
+    public static function invalidSnapshotAliquots(): array
+    {
+        $cases = [];
+        foreach (['legacy', 2, 3] as $version) foreach (['restore', 'merge'] as $operation) {
+            $cases[] = [$version, $operation, 'product'];
+            if ($version !== 'legacy') $cases[] = [$version, $operation, 'cost'];
+        }
+        return $cases;
+    }
+
+    /** @dataProvider invalidSnapshotAliquots */
+    public function testInvalidSnapshotAliquotsFailBeforeMutationOrConsumption($version, $operation, $target): void
+    {
+        $this->cart->add('first', 'First valid', 1, 1, 0);
+        $last = $this->cart->add('last', 'Last', 1, 2, 3);
+        $this->cart->addCost('service', 1, 'item', 3);
+        $this->cart->store('invalid-snapshot');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        if ($target === 'product') $snapshot['content']->get($last->rowId)->aliquot = 9;
+        else $snapshot['metadata']['costs'][0]['aliquot'] = 9;
+        if ($version === 'legacy') $snapshot = $snapshot['content'];
+        else {
+            $snapshot['version'] = $version;
+            if ($version === 2) unset($snapshot['decimals']);
+        }
+        $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+        $this->cart->destroy();
+        $this->cart->add('existing', 'Existing', 1, 10, 0);
+        $this->cart->addCost('tip', 2);
+        $before = serialize($this->session->all());
+        $stored = serialize($this->db->table('shopping_cart')->get()->all());
+        try { $this->cart->$operation('invalid-snapshot'); self::fail('Invalid snapshot accepted'); }
+        catch (InvalidArgumentException $e) { self::assertStringStartsWith('Invalid aliquot:', $e->getMessage()); }
+        self::assertSame($before, serialize($this->session->all()));
+        self::assertSame($stored, serialize($this->db->table('shopping_cart')->get()->all()));
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();

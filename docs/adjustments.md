@@ -690,9 +690,11 @@ the configured precision. Fixed discounts preserve the requested `value` and car
 `fixedUnits` for their quantized amount; `amount`/`cents` still report the effective
 capped discount. Percentage discounts keep their percentage unchanged.
 
-Input numeric values may still be floats. Quantization normalizes binary noise in
-the scaled value before HALF_UP or truncation; this is not an arbitrary-precision
-decimal engine. Distribution, HKA residue application and scale conversion use integers.
+Numeric strings preserve their exact decimal representation, including scientific
+notation. Floats are normalized to 15 significant digits to reduce ordinary IEEE-754
+noise; exact decimal boundaries should be supplied as strings. Money then analyzes
+the decimal representation; it is not an arbitrary-precision decimal engine.
+Distribution, HKA residue application and scale conversion use integers.
 `number_format()` only presents values; `decimal_point` and `thousand_separator`
 do not affect arithmetic, while `decimals` now does.
 

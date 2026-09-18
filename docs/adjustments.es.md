@@ -692,8 +692,10 @@ la precisión configurada. Los descuentos fijos conservan `value` solicitado y
 agregan `fixedUnits` con su monto cuantizado; `amount`/`cents` siguen mostrando el
 descuento efectivo limitado al saldo. Los porcentajes no cambian de escala.
 
-Las entradas numéricas siguen admitiendo floats. Al cuantizar se normaliza ruido
-binario del valor escalado antes de HALF_UP o truncamiento; no es un motor decimal
+Los numeric-string conservan su representación decimal exacta, incluida notación
+científica. Los floats se normalizan a 15 cifras significativas para reducir el
+ruido habitual de IEEE-754; para fronteras decimales exactas se recomienda proporcionar
+strings. Money analiza después la representación decimal; no es un motor decimal
 de precisión arbitraria. Reparto, aplicación del residuo HKA y conversión de escalas
 usan enteros. `number_format()` sólo presenta valores; `decimal_point` y
 `thousand_separator` no afectan la aritmética, pero `decimals` ahora sí.

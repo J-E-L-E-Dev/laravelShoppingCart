@@ -18,15 +18,25 @@ final class FiscalCalculator
         return $rate;
     }
 
-    /** Valida la estructura mínima del catálogo antes de cualquier cálculo fiscal. */
+    /** Exige las cuatro alícuotas venezolanas, nombres únicos y tasas válidas antes del cálculo. */
     public static function taxCatalog()
     {
         $catalog = config('cart.taxes');
         if (!is_array($catalog)) throw new \InvalidArgumentException('Invalid tax configuration: cart.taxes must be an array.');
+        foreach ([0, 1, 2, 3] as $aliquot) {
+            if (!array_key_exists($aliquot, $catalog)) {
+                throw new \InvalidArgumentException('Invalid tax configuration: aliquots 0, 1, 2 and 3 are required.');
+            }
+        }
+        if (count($catalog) !== 4) throw new \InvalidArgumentException('Invalid tax configuration: only aliquots 0, 1, 2 and 3 are allowed.');
+        $names = [];
         foreach ($catalog as $tax) {
-            if (!is_array($tax) || !isset($tax['name']) || !is_string($tax['name']) || $tax['name'] === '' || !array_key_exists('value', $tax)) {
+            if (!is_array($tax) || !isset($tax['name']) || !is_string($tax['name']) || trim($tax['name']) === '' || !array_key_exists('value', $tax)) {
                 throw new \InvalidArgumentException('Invalid tax configuration: each entry requires name and value.');
             }
+            $name = mb_strtolower(trim($tax['name']), 'UTF-8');
+            if (in_array($name, $names, true)) throw new \InvalidArgumentException('Invalid tax configuration: tax names must be unique.');
+            $names[] = $name;
             self::validateTaxRate($tax['value']);
         }
         return $catalog;
@@ -36,10 +46,16 @@ final class FiscalCalculator
     public static function taxRate($aliquot)
     {
         $catalog = self::taxCatalog();
-        if ((!is_int($aliquot) && !is_string($aliquot)) || !array_key_exists($aliquot, $catalog)) {
-            throw new \InvalidArgumentException('Invalid aliquot.');
-        }
+        self::validateAliquot($aliquot, $catalog);
         return $catalog[$aliquot]['value'];
+    }
+
+    /** Comprueba pertenencia inequívoca a un catálogo ya validado, sin convertir claves ambiguas. */
+    public static function validateAliquot($aliquot, array $catalog)
+    {
+        if ((!is_int($aliquot) && !is_string($aliquot)) || !array_key_exists($aliquot, $catalog)) {
+            throw new \InvalidArgumentException('Invalid aliquot: fiscal line references an unconfigured aliquot.');
+        }
     }
 
     /** Conserva HKA como alternativa histórica para un driver desconocido en Cart. */
@@ -61,8 +77,15 @@ final class FiscalCalculator
     public static function calculate(array $lines, $driver, array $taxes = [])
     {
         Money::decimals();
+        $catalog = self::taxCatalog();
+        foreach ($lines as $line) {
+            if (!is_array($line) || !array_key_exists('aliquot', $line) || !array_key_exists('base', $line) || !array_key_exists('rawBase', $line)) {
+                throw new \InvalidArgumentException('Invalid fiscal line: aliquot, base and rawBase are required.');
+            }
+            self::validateAliquot($line['aliquot'], $catalog);
+        }
         $lineTaxes = [];
-        foreach (self::taxCatalog() as $aliquot => $tax) {
+        foreach ($catalog as $aliquot => $tax) {
             $group = array_filter($lines, function ($line) use ($aliquot) {
                 return (string) $line['aliquot'] === (string) $aliquot;
             });

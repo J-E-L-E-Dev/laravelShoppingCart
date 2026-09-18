@@ -407,6 +407,9 @@ trait CartAdjustments
     {
         $taxCatalog = FiscalCalculator::taxCatalog();
         $metadata = $this->metadata();
+        foreach ($metadata['costs'] as $cost) {
+            if ($cost['mode'] === self::COST_ITEM) FiscalCalculator::validateAliquot($cost['aliquot'] ?? null, $taxCatalog);
+        }
         $lines = $weights = $rawBases = [];
         foreach ($this->getContent() as $rowId => $item) {
             $rawBases[$rowId] = $item->qty * $item->price;

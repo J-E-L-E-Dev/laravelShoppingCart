@@ -817,10 +817,13 @@ class Cart
 
         if (is_array($storedContent) && isset($storedContent['version'])) {
             $incomingMetadata = $this->snapshotMetadata($storedContent);
+            $this->validateFiscalAliquots($storedContent['content'], $incomingMetadata['costs']);
             $metadata = $this->metadata();
             foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
             $this->saveMetadata($metadata);
             $storedContent = $storedContent['content'];
+        } else {
+            $this->validateFiscalAliquots($storedContent);
         }
 
         $this->instance(data_get($stored, 'instance'));
@@ -876,6 +879,7 @@ class Cart
             $incomingMetadata = $this->snapshotMetadata($storedContent);
             $storedContent = $storedContent['content'];
         }
+        $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
         $identities = [];
         foreach ($storedContent as $cartItem) {
             $oldRowId = $cartItem->rowId;
@@ -963,15 +967,27 @@ class Cart
         return null;
     }
 
+    /** Valida productos y costos ITEM antes de mutar sesión; conserva el default histórico para alícuotas omitidas. */
+    private function validateFiscalAliquots($content, array $costs = [])
+    {
+        $catalog = FiscalCalculator::taxCatalog();
+        foreach ($content as $item) {
+            FiscalCalculator::validateAliquot($item->aliquot ?? config('cart.default_aliquot'), $catalog);
+        }
+        foreach ($costs as $cost) {
+            if ($cost['mode'] === self::COST_ITEM) FiscalCalculator::validateAliquot($cost['aliquot'] ?? null, $catalog);
+        }
+    }
+
     /**
      * Recupera la colección de sesión y normaliza campos de snapshots antiguos.
      *
-     * Si no existe devuelve una colección vacía. Sustituye alícuota nula por la
-     * predeterminada. priceTax se deriva al leerlo, incluso en snapshots antiguos.
-     * La normalización actúa sobre los objetos existentes y conserva su rowId.
+     * Valida todas las alícuotas antes de modificar objetos. Si no existe devuelve
+     * una colección vacía. Sustituye alícuota nula por la predeterminada sin cambiar
+     * rowId. priceTax se deriva al leerlo, incluso en snapshots antiguos.
      *
      * @return Collection<string, CartItem> Productos originales de la instancia.
-     * @throws \InvalidArgumentException Si la alícuota o el impuesto no son válidos.
+     * @throws \InvalidArgumentException Si el catálogo o una alícuota no son válidos.
      */
     protected function getContent()
     {
@@ -979,6 +995,7 @@ class Cart
             ? $this->session->get($this->instance)
             : new Collection;
 
+        $this->validateFiscalAliquots($content);
         foreach ($content as $item) {
             // Normaliza la alícuota omitida en snapshots antiguos sin sustituir su rowId.
             if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
