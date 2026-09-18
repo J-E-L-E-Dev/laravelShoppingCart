@@ -720,6 +720,13 @@ their bases and taxes are recalculated at the current precision.
 
 ## Persistence
 
+The active cart uses Laravel's configured session storage.
+Database persistence is optional and is only required when using `store()`,
+`restore()`, or `merge()` with persisted carts.
+
+If Laravel uses `SESSION_DRIVER=database`, its session table is separate from
+the optional `shopping_cart` table used by this package.
+
 Products continue to be stored in the session under:
 
 ```text
@@ -747,7 +754,7 @@ This allows costs, discounts, and observations to be preserved without convertin
 
 ### `store()`
 
-`store()` persists the cart using a versioned envelope containing products and metadata.
+`store()` persists the cart using a versioned envelope containing products and metadata in the optional `shopping_cart` table.
 
 Conceptually:
 
@@ -765,15 +772,23 @@ Both `restore()` and `merge()` interpret v2 monetary integers at historical prec
 2 and rescale to the current precision. V3 requires explicit `decimals`; unknown
 versions are rejected. Historical `cents = 123` becomes 1230 units at precision 3
 and still means 1.23. Stored fixed discount units are converted as well; requested
-values and percentage rates remain unchanged. No database migration is required.
+values and percentage rates remain unchanged.
+
+Upgrading the snapshot format from v2 to v3 does not require an additional database
+schema migration. This does not remove the requirement for the `shopping_cart`
+table when `store()`, `restore()`, or `merge()` is used.
 
 ### `restore()`
 
-`restore()` retrieves a stored cart.
+`restore()` retrieves a stored cart for the selected instance.
 
-Restored products are overlaid according to the existing identity rules, and stored metadata is appended to the current metadata.
+Each stored line is incorporated using its preserved `rowId`. If the active cart
+already contains that same `rowId`, the stored line replaces it; lines with other
+`rowId` values remain. `restore()` does not add quantities or reconcile different
+identities. Metadata from the versioned snapshot is appended to the current metadata.
 
-After a successful restore, the persisted record is consumed.
+After a successful restore, the persisted record is consumed and removed from the
+persistence table.
 
 To completely replace the current cart before restoring another one:
 
@@ -814,6 +829,49 @@ cart_metadata.<instance>
 
 for the active instance.
 
+It does not delete snapshots stored in the `shopping_cart` table.
+
+---
+
+## Public API
+
+### Line Resolution
+
+`get()` first attempts an exact `rowId` match and, if none exists, searches by
+product code/id:
+
+```php
+$item = Cart::get($rowIdOrProductCode);
+```
+
+Lookup by product code is valid only when it identifies exactly one line.
+
+`getByRowId()` searches exclusively by the line's internal identifier and does
+not fall back to the product code:
+
+```php
+$item = Cart::getByRowId($rowId);
+```
+
+If that `rowId` does not exist, `InvalidRowIDException` is thrown.
+
+`getById()` searches exclusively by product code/id:
+
+```php
+$item = Cart::getById('P001');
+```
+
+It returns exactly one line. If multiple lines share the same code because of
+different options or aliquots, `AmbiguousItemException` is thrown; if there is
+no match, `InvalidRowIDException` is thrown.
+
+Product code comparison uses its string representation: integer `123` and string
+`'123'` match, while a string code with leading zeros, such as `'000123'`,
+preserves those zeros and does not equal `'123'`.
+
+Consumer applications must keep the `rowId` returned by the package and must not
+generate, reconstruct, or predict it.
+
 ---
 
 ## Upgrade Considerations
@@ -825,7 +883,8 @@ for the active instance.
 - Review `cart.taxes`: it must contain exactly keys 0, 1, 2, and 3, with no omissions or extra categories. Names must be unique and rates numeric, finite, and nonnegative.
 - `discount.value` preserves `int|float|numeric-string`; do not assume float or unnecessarily convert exact strings. `fixedUnits` preserves a fixed discount's quantization history.
 - Use `summary()` to settle products, costs, and discounts fiscally; do not reconstruct the document by multiplying taxes or adding adjustments already included.
-- Valid legacy and v2 snapshots remain compatible. V2 uses its historical two-decimal precision; v3 includes explicit precision and must not be consumed by older versions. No mandatory SQL migration is needed; restore/merge reject corrupt data before incorporating it.
+- Valid legacy and v2 snapshots remain compatible. V2 uses its historical two-decimal precision; v3 includes explicit precision and must not be consumed by older versions. The snapshot format change does not require an additional SQL schema migration for an existing persistence table; `restore()`/`merge()` reject corrupt data before incorporating it.
+- The `shopping_cart` table is required only when the application uses explicit persistence through `store()`, `restore()`, or `merge()`. Normal session-backed cart usage does not require this table.
 
 See [CHANGELOG.md](../CHANGELOG.md) for the v3.0.0 breaking changes in detail.
 

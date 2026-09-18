@@ -722,6 +722,13 @@ unitarios permanecen originales; sus bases e impuestos se recalculan.
 
 ## Persistencia
 
+El carrito activo utiliza el almacenamiento de sesión configurado por Laravel.
+La persistencia en base de datos es opcional y sólo es necesaria cuando se usan
+`store()`, `restore()` o `merge()` con carritos persistidos.
+
+Si Laravel utiliza `SESSION_DRIVER=database`, su tabla de sesiones es independiente
+de la tabla opcional `shopping_cart` utilizada por este paquete.
+
 Los productos continúan almacenándose en la sesión bajo:
 
 ```text
@@ -749,7 +756,7 @@ Esto permite conservar costos, descuentos y observaciones sin convertirlos en pr
 
 ### `store()`
 
-`store()` persiste el carrito mediante un sobre versionado que contiene productos y metadatos.
+`store()` persiste el carrito mediante un sobre versionado que contiene productos y metadatos en la tabla opcional `shopping_cart`.
 
 Conceptualmente:
 
@@ -767,15 +774,23 @@ Tanto `restore()` como `merge()` interpretan los enteros monetarios v2 con preci
 histórica 2 y los convierten a la actual. V3 exige `decimals` explícito; rechaza
 versiones desconocidas. Un `cents = 123` histórico pasa a 1230 unidades con precisión
 3 y sigue significando 1.23. También se convierten las unidades de descuentos fijos;
-se conservan valores solicitados y porcentajes. No requiere migración de base de datos.
+se conservan valores solicitados y porcentajes.
+
+La actualización del formato de snapshots de v2 a v3 no requiere una migración
+adicional del esquema de base de datos. Esto no elimina el requisito de disponer
+de la tabla `shopping_cart` cuando se desea utilizar `store()`, `restore()` o `merge()`.
 
 ### `restore()`
 
-`restore()` recupera el carrito almacenado.
+`restore()` recupera un carrito almacenado para la instancia seleccionada.
 
-Los productos restaurados se superponen según las reglas existentes de identidad y los metadatos almacenados se agregan a los metadatos actuales.
+Cada línea almacenada se incorpora por su `rowId` conservado. Si el carrito activo
+ya contiene ese mismo `rowId`, la línea almacenada lo reemplaza; las líneas con
+otros `rowId` permanecen. `restore()` no suma cantidades ni recalcula identidades
+diferentes. Los metadatos del snapshot versionado se agregan a los metadatos actuales.
 
-Después de una restauración correcta, el registro persistido es consumido.
+Después de una restauración correcta, el registro persistido es consumido y se
+elimina de la tabla de persistencia.
 
 Si se desea reemplazar completamente el carrito actual antes de restaurar otro:
 
@@ -816,6 +831,49 @@ cart_metadata.<instancia>
 
 para la instancia activa.
 
+No elimina snapshots almacenados en la tabla `shopping_cart`.
+
+---
+
+## API pública
+
+### Resolución de líneas
+
+`get()` intenta primero una coincidencia exacta por `rowId` y, si no existe, busca
+por código/id de producto:
+
+```php
+$item = Cart::get($rowIdOrProductCode);
+```
+
+La búsqueda por código sólo es válida cuando identifica una única línea.
+
+`getByRowId()` busca exclusivamente por el identificador interno de la línea y no
+hace fallback al código del producto:
+
+```php
+$item = Cart::getByRowId($rowId);
+```
+
+Si ese `rowId` no existe, se lanza `InvalidRowIDException`.
+
+`getById()` busca exclusivamente por código/id de producto:
+
+```php
+$item = Cart::getById('P001');
+```
+
+Devuelve una única línea. Si varias líneas comparten el mismo código debido a
+opciones o alícuotas diferentes, se lanza `AmbiguousItemException`; si no existe
+ninguna coincidencia, se lanza `InvalidRowIDException`.
+
+La comparación del código utiliza su representación string: un entero `123` y el
+string `'123'` coinciden, mientras que un código string con ceros iniciales, como
+`'000123'`, conserva esos ceros y no equivale a `'123'`.
+
+Las aplicaciones consumidoras deben conservar el `rowId` entregado por el paquete
+y no generarlo, reconstruirlo ni predecirlo.
+
 ---
 
 ## Consideraciones al actualizar
@@ -827,7 +885,8 @@ para la instancia activa.
 - Revisar `cart.taxes`: debe contener exactamente las claves 0, 1, 2 y 3, sin omisiones ni categorías adicionales. Los nombres deben ser únicos y las tasas numéricas, finitas y no negativas.
 - `discount.value` conserva `int|float|numeric-string`; no asumir float ni convertir strings exactos innecesariamente. `fixedUnits` conserva el historial de cuantización del descuento fijo.
 - Usar `summary()` para liquidar fiscalmente productos, costos y descuentos; no reconstruir el documento multiplicando impuestos ni agregando ajustes ya incluidos.
-- Los snapshots legacy y v2 válidos siguen siendo compatibles. V2 usa dos decimales históricos; v3 incorpora precisión explícita y no debe consumirse con versiones antiguas. No hay migración SQL obligatoria; restore/merge rechazan datos corruptos antes de incorporarlos.
+- Los snapshots legacy y v2 válidos siguen siendo compatibles. V2 usa dos decimales históricos; v3 incorpora precisión explícita y no debe consumirse con versiones antiguas. El cambio de formato de snapshot no exige una migración SQL adicional del esquema existente; `restore()`/`merge()` rechazan datos corruptos antes de incorporarlos.
+- La tabla `shopping_cart` sólo es necesaria si la aplicación utiliza persistencia explícita mediante `store()`, `restore()` o `merge()`. El uso normal del carrito mediante sesión no requiere esta tabla.
 
 Consultar [CHANGELOG.es.md](../CHANGELOG.es.md) para el detalle de los cambios incompatibles de v3.0.0.
 
