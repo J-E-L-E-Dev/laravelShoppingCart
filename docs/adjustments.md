@@ -454,6 +454,13 @@ uses the names configured in:
 config('cart.taxes');
 ```
 
+The Venezuelan fiscal contract requires exactly keys 0, 1, 2 and 3: none may be
+removed and no additional keys are allowed. `name` and `value` are configurable.
+Names must be nonempty strings after trimming and unique ignoring case and
+surrounding whitespace; rates must be numeric, finite and nonnegative. A product
+or ITEM cost outside 0..3 raises `InvalidArgumentException`, never a silent
+omission from the calculation.
+
 Each tax contains:
 
 ```php

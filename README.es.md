@@ -84,7 +84,13 @@ Las alicuotas con sus valores de tasas por defecto son:
     ]
 ```
 
-Puede modificar las propiedades name y value seg&uacute;n sus necesidades.
+El catálogo fiscal venezolano exige exactamente las claves **0, 1, 2 y 3**:
+son obligatorias y no se pueden eliminar ni agregar claves adicionales.
+Los campos `name` y `value` son configurables. Cada `name` debe ser un string
+no vacío tras quitar espacios exteriores y único, ignorando esos espacios y
+mayúsculas/minúsculas. Cada `value` debe ser numérico, finito y no negativo.
+Una línea fiscal (producto o costo ITEM) fuera de 0..3 provoca
+`InvalidArgumentException`; nunca se ignora silenciosamente.
 
 Para Venezuela, el paquete soporta el c&aacute;lculo de facturas para los proveedores fiscales 'The Factory HKA' y 'Desarrollos PNP'
 

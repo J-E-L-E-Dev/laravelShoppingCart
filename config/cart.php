@@ -20,6 +20,10 @@ return [
     |
     | Available tax rate values will be used when you make a class implement the
     | Taxable interface and use the HasTax trait.
+    | Keys 0, 1, 2 and 3 are mandatory; no additional tax-category keys are allowed.
+    | Names may be customized: nonempty strings, unique ignoring case and outer spaces.
+    | Values may be customized but must be numeric, finite and nonnegative.
+    | Products and ITEM costs outside this catalog raise InvalidArgumentException.
     |
     */
 

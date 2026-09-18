@@ -791,6 +791,8 @@ class Cart
      * Agrega metadatos guardados después de los existentes y sobrescribe productos
      * por rowId, sin sumar cantidades ni reconciliar identidades diferentes.
      * Guarda sesión, despacha cart.restored, recupera fechas y elimina el snapshot.
+     * Prevalida destino, origen, metadatos y fechas sin mutar sesión; un fallo de
+     * validación conserva productos, metadatos, instancia, fechas y snapshot.
      * Para sustituir todo el carrito debe llamarse destroy() antes de restaurar.
      *
      * @param int|string|InstanceIdentifier $identifier Identificador del snapshot de la instancia seleccionada.
@@ -814,34 +816,39 @@ class Cart
             ->where(['identifier'=> $identifier, 'instance' => $currentInstance])->first();
 
         $storedContent = unserialize(data_get($stored, 'content'));
-
-        if (is_array($storedContent) && isset($storedContent['version'])) {
+        $versioned = is_array($storedContent) && isset($storedContent['version']);
+        $incomingMetadata = ['costs' => [], 'discounts' => [], 'observations' => []];
+        if ($versioned) {
             $incomingMetadata = $this->snapshotMetadata($storedContent);
-            $this->validateFiscalAliquots($storedContent['content'], $incomingMetadata['costs']);
-            $metadata = $this->metadata();
-            foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
-            $this->saveMetadata($metadata);
             $storedContent = $storedContent['content'];
-        } else {
-            $this->validateFiscalAliquots($storedContent);
         }
 
-        $this->instance(data_get($stored, 'instance'));
+        // Prevalida sin getContent(): su normalización histórica puede mutar objetos de sesión.
+        $metadata = $this->metadata();
+        $content = $this->session->get($this->instance, new Collection);
+        $this->validateFiscalAliquots($content, $metadata['costs']);
+        $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
+        foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
+        $createdAt = Carbon::parse(data_get($stored, 'created_at'));
+        $updatedAt = Carbon::parse(data_get($stored, 'updated_at'));
 
-        $content = $this->getContent();
-
+        // Aplica sólo después de superar todas las validaciones deterministas.
+        foreach ($content as $item) {
+            if ($item->aliquot === null) $item->aliquot = config('cart.default_aliquot');
+        }
         foreach ($storedContent as $cartItem) {
             $content->put($cartItem->rowId, $cartItem);
         }
 
+        if ($versioned) $this->saveMetadata($metadata);
         $this->session->put($this->instance, $content);
 
         $this->events->dispatch('cart.restored');
 
         $this->instance($currentInstance);
 
-        $this->createdAt = Carbon::parse(data_get($stored, 'created_at'));
-        $this->updatedAt = Carbon::parse(data_get($stored, 'updated_at'));
+        $this->createdAt = $createdAt;
+        $this->updatedAt = $updatedAt;
 
         $this->getConnection()->table($this->getTableName())->where(['identifier' => $identifier, 'instance' => $currentInstance])->delete();
 
@@ -855,6 +862,8 @@ class Cart
      * del origen después de los actuales; remapea los descuentos de línea al rowId
      * que sobreviva. Acepta Collection antigua y sobres con version/metadata.
      * Despacha cart.merged; repetir la llamada vuelve a incorporar datos.
+     * Prevalida metadatos, alícuotas del destino y el recálculo fiscal de todas
+     * las entradas sobre copias antes de incorporar el primer producto.
      *
      * @param int|string|InstanceIdentifier $identifier Identificador del snapshot de origen.
      * @param bool $dispatchAdd Si se publican cart.adding/cart.added por producto.
@@ -880,6 +889,13 @@ class Cart
             $storedContent = $storedContent['content'];
         }
         $this->validateFiscalAliquots($storedContent, $incomingMetadata['costs']);
+        $metadata = $this->metadata();
+        $this->validateFiscalAliquots($this->session->get($this->instance, new Collection), $metadata['costs']);
+        // addCartItem recalcula el impuesto: comprueba cada entrada antes de incorporar la primera.
+        foreach ($storedContent as $cartItem) {
+            $candidate = clone $cartItem;
+            $candidate->setTaxRate($candidate->aliquot);
+        }
         $identities = [];
         foreach ($storedContent as $cartItem) {
             $oldRowId = $cartItem->rowId;
@@ -889,7 +905,6 @@ class Cart
             if ($discount['rowId'] !== null) $discount['rowId'] = $identities[$discount['rowId']] ?? $discount['rowId'];
         }
         unset($discount);
-        $metadata = $this->metadata();
         foreach (['costs', 'discounts', 'observations'] as $key) $metadata[$key] = array_merge($metadata[$key], $incomingMetadata[$key]);
         $this->saveMetadata($metadata);
         $this->events->dispatch('cart.merged');

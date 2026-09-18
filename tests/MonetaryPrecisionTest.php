@@ -703,6 +703,99 @@ class MonetaryPrecisionTest extends TestCase
         self::assertSame($stored, serialize($this->db->table('shopping_cart')->get()->all()));
     }
 
+    public static function invalidDestinationRestorations(): array
+    {
+        $cases = [];
+        foreach ([2, 3] as $version) foreach (['restore', 'merge'] as $operation) {
+            foreach (['product', 'cost', 'precision'] as $fault) $cases[] = [$version, $operation, $fault];
+        }
+        $cases[] = [3, 'merge', 'incoming-price'];
+        $cases[] = [3, 'restore', 'date'];
+        return $cases;
+    }
+
+    /** @dataProvider invalidDestinationRestorations */
+    public function testRestorationValidationHasNoObservableMutation($version, $operation, $fault): void
+    {
+        $this->cart->instance('atomic');
+        $this->cart->add('incoming-first', 'Valid', 1, 1, 0);
+        $last = $this->cart->add('incoming-last', 'Last', 1, 2, 3);
+        $this->cart->addCost('incoming-cost', 1, 'item', 3);
+        $this->cart->addDiscount('fixed', .1);
+        $this->cart->addObservation('Incoming observation');
+        $this->cart->store('valid-snapshot');
+        $snapshot = unserialize($this->db->table('shopping_cart')->value('content'));
+        $snapshot['version'] = $version;
+        if ($version === 2) unset($snapshot['decimals']);
+        if ($fault === 'incoming-price') $snapshot['content']->get($last->rowId)->price = INF;
+        $this->db->table('shopping_cart')->update(['content' => serialize($snapshot)]);
+        if ($fault === 'date') $this->db->table('shopping_cart')->update(['updated_at' => 'invalid-date']);
+        $this->cart->destroy();
+        $legacy = $this->cart->add('legacy', 'Legacy', 1, 1, 0);
+        $item = $this->cart->add('existing', 'Existing', 1, 10, 0);
+        $this->cart->addCost('existing-cost', 2, 'item', 0);
+        $this->cart->addDiscount('fixed', .2);
+        $this->cart->addObservation('Existing observation');
+        // Esta referencia no debe ser normalizada si falla otra validación posterior.
+        $legacy->aliquot = null;
+        if ($fault === 'product') $item->aliquot = 9;
+        $metadata = $this->session->get('cart_metadata.atomic');
+        if ($fault === 'cost') $metadata['costs'][0]['aliquot'] = 9;
+        if ($fault === 'precision') $metadata['decimals'] = 5;
+        $this->session->put('cart_metadata.atomic', $metadata);
+        $this->cart->createdAt = new \Carbon\Carbon('2020-01-01');
+        $this->cart->updatedAt = new \Carbon\Carbon('2020-02-01');
+        $createdAt = $this->cart->createdAt;
+        $updatedAt = $this->cart->updatedAt;
+        $session = serialize($this->session->all());
+        $database = serialize($this->db->table('shopping_cart')->get()->all());
+        $events = [];
+        foreach (['cart.restored', 'cart.merged', 'cart.adding', 'cart.added'] as $name) {
+            $this->events->listen($name, function () use (&$events, $name) { $events[] = $name; });
+        }
+        try {
+            if ($operation === 'restore') $this->cart->restore('valid-snapshot');
+            else $this->cart->merge('valid-snapshot', true, 'atomic');
+            self::fail('Invalid restoration accepted');
+        } catch (InvalidArgumentException $e) { self::assertNotSame('', $e->getMessage()); }
+        self::assertSame($session, serialize($this->session->all()));
+        self::assertSame($metadata, $this->session->get('cart_metadata.atomic'));
+        self::assertSame($database, serialize($this->db->table('shopping_cart')->get()->all()));
+        self::assertSame('atomic', $this->cart->currentInstance());
+        self::assertSame($createdAt, $this->cart->createdAt);
+        self::assertSame($updatedAt, $this->cart->updatedAt);
+        self::assertSame([], $events);
+        self::assertNull($legacy->aliquot);
+    }
+
+    public function testValidRestoreOverlaysProductsConcatenatesMetadataAndConsumesSnapshot(): void
+    {
+        $saved = $this->cart->add('shared', 'Saved', 3, 1, 0);
+        $this->cart->addCost('saved-cost', 1, 'item', 3);
+        $this->cart->addDiscount('fixed', .1);
+        $this->cart->addObservation('Saved observation');
+        $this->cart->store('valid');
+        $this->cart->destroy();
+        $this->cart->add('shared', 'Current', 1, 1, 0);
+        $this->cart->add('existing', 'Existing', 1, 2, 0);
+        $this->cart->addCost('existing-cost', 2, 'item', 0);
+        $this->cart->addDiscount('fixed', .2);
+        $this->cart->addObservation('Existing observation');
+        $events = 0;
+        $this->events->listen('cart.restored', function () use (&$events) { $events++; });
+        $this->cart->restore('valid');
+        self::assertSame(2, $this->cart->content()->count());
+        self::assertSame(3, $this->cart->getByRowId($saved->rowId)->qty);
+        self::assertSame('Saved', $this->cart->getByRowId($saved->rowId)->name);
+        $metadata = $this->session->get('cart_metadata.shopping_cart');
+        self::assertSame(['existing-cost', 'saved-cost'], array_column($metadata['costs'], 'name'));
+        self::assertCount(2, $metadata['discounts']);
+        self::assertSame(['Existing observation', 'Saved observation'], array_column($metadata['observations'], 'text'));
+        self::assertSame(1, $events);
+        self::assertSame(0, $this->db->table('shopping_cart')->count());
+        $this->assertTaxSums();
+    }
+
     private function assertTaxSums(): void
     {
         $content = $this->cart->content();

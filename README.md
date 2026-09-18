@@ -83,7 +83,13 @@ The default tax values are as follows:
     ]
 ```
 
-You can modify the name and value properties to your needs.
+The Venezuelan fiscal catalog requires exactly keys **0, 1, 2 and 3**:
+all four are mandatory and no additional keys are allowed.
+The `name` and `value` fields may be customized. Each `name` must be a string,
+nonempty after trimming, and unique ignoring case and surrounding whitespace.
+Each `value` must be numeric, finite and nonnegative. A fiscal line (product or
+ITEM cost) referencing an aliquot outside 0..3 raises `InvalidArgumentException`;
+it is never silently ignored.
 
 For Venezuela, the package supports invoice calculation for the fiscal providers 'The Factory HKA' and 'PNP Developments'
 

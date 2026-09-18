@@ -454,6 +454,13 @@ utiliza los nombres configurados en:
 config('cart.taxes');
 ```
 
+El catálogo exige exactamente las claves 0, 1, 2 y 3 del contrato fiscal venezolano:
+ninguna puede eliminarse y no se admiten claves adicionales. `name` y `value`
+son configurables. Los nombres deben ser strings no vacíos tras `trim` y únicos
+ignorando mayúsculas/minúsculas y espacios exteriores; las tasas deben ser
+numéricas, finitas y no negativas. Un producto o costo ITEM fuera de 0..3 provoca
+`InvalidArgumentException`, nunca una omisión silenciosa del cálculo.
+
 Cada impuesto contiene:
 
 ```php
